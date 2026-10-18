@@ -8,13 +8,14 @@ import signal
 import subprocess
 from datetime import datetime
 from pathlib import Path
-from urllib import request, error
+from urllib import request, error, parse
 
 # Configuracoes de conexao
 MARVIN_HOST = os.environ.get("MARVIN_HOST", "127.0.0.1")
 MARVIN_PORT = os.environ.get("MARVIN_PORT", "8088")
 API_URL = f"http://{MARVIN_HOST}:{MARVIN_PORT}/v1/chat/completions"
 HEALTH_URL = f"http://{MARVIN_HOST}:{MARVIN_PORT}/health"
+MARVIN_SEARCH_URL = os.environ.get("MARVIN_SEARCH_URL", "http://127.0.0.1:8888/search")
 
 # Diretorios padrao
 SESSIONS_DIR = Path.home() / ".local" / "share" / "marvin" / "sessions"
@@ -236,32 +237,21 @@ WEB_SEARCH_SYSTEM_PROMPT = """Ferramenta de pesquisa na web:
 - Nunca afirme que pesquisou se não recebeu resultados da ferramenta."""
 
 def search_web(query: str) -> list:
-    """Search the web through Tavily and return a small, normalized result set."""
-    api_key = os.environ.get("TAVILY_API_KEY", "").strip()
-    if not api_key:
-        raise RuntimeError("Pesquisa web não configurada. Defina TAVILY_API_KEY.")
+    """Search through a local SearXNG instance and return normalized results."""
     if not query or len(query) > 500:
         raise RuntimeError("A consulta de pesquisa está vazia ou é longa demais.")
 
-    payload = {
-        "query": query,
-        "search_depth": "basic",
-        "topic": "general",
-        "max_results": 5,
-        "country": "brazil",
-        "language": "pt",
-        "include_answer": False,
-        "include_raw_content": False,
-        "include_published_date": True,
-    }
+    params = parse.urlencode({
+        "q": query,
+        "format": "json",
+        "language": "pt-BR",
+        "safesearch": "1",
+    })
+    separator = "&" if "?" in MARVIN_SEARCH_URL else "?"
     req = request.Request(
-        "https://api.tavily.com/search",
-        data=json.dumps(payload).encode("utf-8"),
-        headers={
-            "Authorization": f"Bearer {api_key}",
-            "Content-Type": "application/json",
-        },
-        method="POST",
+        f"{MARVIN_SEARCH_URL}{separator}{params}",
+        headers={"Accept": "application/json"},
+        method="GET",
     )
     try:
         with request.urlopen(req, timeout=20) as resp:
@@ -270,11 +260,16 @@ def search_web(query: str) -> list:
             raise RuntimeError("A resposta da pesquisa excedeu o limite de tamanho.")
         data = json.loads(raw.decode("utf-8"))
     except error.HTTPError as err:
-        raise RuntimeError(f"O serviço de pesquisa respondeu com HTTP {err.code}.") from err
+        if err.code == 403:
+            raise RuntimeError("A instância SearXNG recusou o formato JSON; habilite json em search.formats no settings.yml.") from err
+        raise RuntimeError(f"A instância SearXNG respondeu com HTTP {err.code}.") from err
     except error.URLError as err:
-        raise RuntimeError(f"Não foi possível acessar o serviço de pesquisa: {err.reason}.") from err
+        raise RuntimeError(
+            f"Não foi possível acessar SearXNG em {MARVIN_SEARCH_URL}. Confirme o endereço; "
+            "na configuração padrão, inicie a instância com 'docker compose up -d'."
+        ) from err
     except (UnicodeDecodeError, json.JSONDecodeError) as err:
-        raise RuntimeError("O serviço de pesquisa retornou uma resposta inválida.") from err
+        raise RuntimeError("SearXNG retornou uma resposta inválida; confirme que o formato JSON está habilitado.") from err
 
     if not isinstance(data, dict):
         raise RuntimeError("O serviço de pesquisa retornou um formato inesperado.")
@@ -288,11 +283,12 @@ def search_web(query: str) -> list:
         url = item.get("url", "")
         if not isinstance(url, str) or not url.startswith(("https://", "http://")):
             continue
+        published_date = item.get("publishedDate") or item.get("published_date") or ""
         results.append({
             "title": str(item.get("title", "Sem título"))[:300],
             "url": url[:2000],
             "content": str(item.get("content", ""))[:1800],
-            "published_date": str(item.get("published_date") or "")[:100],
+            "published_date": str(published_date)[:100],
         })
     return results
 

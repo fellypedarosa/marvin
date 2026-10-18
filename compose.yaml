@@ -1,0 +1,12 @@
+services:
+  searxng:
+    image: docker.io/searxng/searxng:latest
+    container_name: marvin-searxng
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:8888:8080"
+    environment:
+      SEARXNG_BASE_URL: http://127.0.0.1:8888/
+      SEARXNG_SECRET: marvin-local-searxng-secret-change-before-exposing
+    volumes:
+      - ./searxng/settings.yml:/etc/searxng/settings.yml:ro

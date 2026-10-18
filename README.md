@@ -28,9 +28,9 @@ O sistema e composto por tres componentes principais:
 
 4. **Pesquisa na Web (opcional)**:
    - O modelo pode solicitar uma pesquisa quando a pergunta exigir informacoes atuais ou fontes externas.
-   - O cliente consulta a API do Tavily, devolve ate cinco resumos ao modelo e inclui os links das fontes na resposta.
-   - Configure `TAVILY_API_KEY` no ambiente do usuario para habilitar a pesquisa. Sem a chave, o Marvin informa que nao conseguiu pesquisar e responde sem alegar que consultou a web.
-   - A consulta e enviada ao servico Tavily. O modelo continua rodando localmente, mas a pesquisa nao e local. Os resultados sao resumos de busca; o Marvin nao abre automaticamente as paginas completas.
+   - O cliente consulta uma instancia local do SearXNG, devolve ate cinco resumos ao modelo e inclui os links das fontes na resposta.
+   - O SearXNG e software livre e nao exige conta, chave de API ou pagamento por consulta. Os mecanismos de busca agregados podem aplicar seus proprios limites.
+   - A instancia fica vinculada a `127.0.0.1:8888`. As consultas sao encaminhadas pelo SearXNG aos mecanismos externos configurados; o modelo continua rodando localmente. Os resultados sao resumos de busca; o Marvin nao abre automaticamente as paginas completas.
 
 ---
 
@@ -77,20 +77,26 @@ journalctl -n 50 | mvn "identifique possiveis erros nestes logs"
 ### Pesquisa na Web
 O Marvin pode pesquisar durante uma conversa quando precisar de dados atuais, como cotacoes, ou de informacoes que nao consegue confirmar apenas com o modelo local. Para termos como "agora", "hoje" e "cotacao", o cliente força a busca; em outras perguntas, o modelo pode solicitar a ferramenta. O cliente executa no maximo uma consulta por pergunta, devolve os resultados para sintese e mostra os links consultados.
 
-Para habilitar, crie uma chave de API no [Tavily](https://app.tavily.com/) e exporte-a no ambiente em que o comando `mvn` sera executado. O cliente usa o endpoint de [pesquisa da API Tavily](https://docs.tavily.com/documentation/api-reference/endpoint/search):
+O Marvin usa o [SearXNG](https://github.com/searxng/searxng), um metabuscador de codigo aberto, executado localmente via Docker Compose. E necessario ter Docker Engine com o plugin Compose instalado. Nao e necessario criar conta nem configurar chave de API ou pagar por consulta ao SearXNG. Ele encaminha as consultas aos mecanismos externos; esses mecanismos podem limitar ou bloquear requisicoes.
 
 ```bash
-export TAVILY_API_KEY="sua-chave"
+docker compose up -d
 ```
 
-Adicione a linha ao `~/.zshrc` ou `~/.bashrc` para mante-la entre sessoes e abra um novo terminal. Nao coloque a chave no repositorio.
+O endpoint JSON fica habilitado na configuracao versionada em `searxng/settings.yml`, e o servico escuta somente no loopback (`127.0.0.1:8888`). Para conferir se respondeu:
+
+```bash
+curl -fsS 'http://127.0.0.1:8888/search?q=teste&format=json' | head
+```
 
 Exemplo:
 ```bash
 mvn qual e a cotacao atual do dolar em reais?
 ```
 
-O Marvin deve citar os resultados numerados (`[1]`, `[2]`) e listar os links ao final. A data e hora da consulta indicam quando a busca foi feita; a data de publicacao depende do que o servico encontrar. Para cotacoes, confirme qual tipo de valor a fonte apresenta (por exemplo, compra, venda ou turismo). A busca requer internet e envia o texto da consulta ao Tavily. Sem `TAVILY_API_KEY`, o restante do chat continua funcionando, mas a pesquisa fica indisponivel.
+O Marvin deve citar os resultados numerados (`[1]`, `[2]`) e listar os links ao final. A data e hora da consulta indicam quando a busca foi feita; a data de publicacao depende do que os mecanismos retornarem. Para cotacoes, confirme qual tipo de valor a fonte apresenta (por exemplo, compra, venda ou turismo). A busca requer internet. Para parar o SearXNG, execute `docker compose down`.
+
+O formato JSON precisa estar habilitado no SearXNG para a integracao funcionar; a configuracao fornecida ja faz isso. A [API do SearXNG](https://docs.searxng.org/dev/search_api.html) documenta o parametro `format=json` e observa que cada instancia deve habilitar explicitamente os formatos que aceita.
 
 ### Modo Chat Interativo (REPL)
 Executar o comando sem argumentos e com terminal interativo inicia uma sessao de conversa continua:
