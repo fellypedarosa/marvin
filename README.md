@@ -155,8 +155,9 @@ Como Funciona o Ciclo de Execucao:
    mvn -x --verbose investigue os logs do servico
    ```
 5. **Decisao Multi-Passo**: Com base na saida real do sistema, o Marvin decide autonomamente:
-   - Se precisa de outro comando para aprofundar ou corrigir a busca (ate o limite seguro de 4 turnos);
-   - Ou se ja tem dados suficientes para entregar o **Relatorio Final** detalhado em linguagem natural.
+   - Se precisa de outro comando para aprofundar ou corrigir a busca (ate 4 comandos por ciclo);
+   - Ou se ja concluiu o pedido e pode entregar o **Relatorio Final**. Uma falha explicada ou um proximo passo sugerido nao conta como tarefa concluida; o Marvin verifica essa condicao antes de encerrar.
+6. **Pedido de Orientacao**: Se ainda precisar agir depois de 4 comandos, o Marvin resume o que tentou e aguarda sua orientacao no mesmo processo. Sua resposta inicia outro ciclo de ate 4 comandos; digite `encerrar` para parar. Cada comando continua exigindo confirmacao.
 
 ### Personalidade e Regras de Comportamento
 O Marvin carrega suas instrucoes mestras diretamente do arquivo:

@@ -299,6 +299,25 @@ def query_messages_raw(messages: list) -> str:
 
 MAX_ACTION_TURNS = 4
 
+
+def verify_action_completion(messages: list, proposed_answer: str) -> bool:
+    """Aceita uma resposta final apenas quando o objetivo tem evidencias de conclusao."""
+    audit_messages = list(messages)
+    audit_messages.extend([
+        {"role": "assistant", "content": proposed_answer},
+        {
+            "role": "user",
+            "content": (
+                "Auditoria de conclusao: compare a solicitacao original com os resultados reais dos comandos. "
+                "Uma explicacao do erro ou uma sugestao de proximo passo NAO significa que a tarefa foi concluida. "
+                "So responda exatamente <<<TASK_COMPLETE>>> se houver evidencia clara de que o objetivo pedido foi realizado. "
+                "Se ainda falta qualquer parte do objetivo, responda exatamente <<<TASK_INCOMPLETE>>>."
+            ),
+        },
+    ])
+    verdict = query_messages_raw(audit_messages)
+    return "<<<TASK_COMPLETE>>>" in verdict
+
 WEB_SEARCH_MARKER = "<<<WEB_SEARCH>>>"
 FRESHNESS_QUERY = re.compile(
     r"\b(agora|hoje|atual(?:mente)?|neste momento|cotação|cotacao|"
@@ -525,6 +544,8 @@ def handle_action_mode(user_instruction: str, verbose: bool = False):
         "Comando: <comando bash aqui>\n"
         "Finalidade: <explicacao concisa em uma frase do que o comando faz>\n\n"
         "2. Apenas responda com <<<FINAL_ANSWER>>> DEPOIS de ter recebido o resultado real de ao menos um comando executado. "
+        "Use <<<FINAL_ANSWER>>> somente quando o objetivo solicitado tiver sido realmente concluido e isso estiver comprovado pelas saidas. "
+        "Relatar uma falha, explicar por que nao conseguiu ou sugerir proximos passos NAO e concluir a tarefa; nesses casos, proponha outra <<<ACTION>>>. "
         "Formato da conclusao:\n"
         "<<<FINAL_ANSWER>>>\n"
         "<sua explicacao detalhada e amigavel em portugues sintetizando os dados reais obtidos>\n\n"
@@ -542,143 +563,191 @@ def handle_action_mode(user_instruction: str, verbose: bool = False):
 
     terminal_console().print(Text("Iniciando investigacao operacional...", style="bold cyan"))
 
-    for turn in range(1, MAX_ACTION_TURNS + 1):
-        raw_response = query_messages_raw(messages)
-
-        # Se tentou adivinhar no primeiro turno sem executar comando
-        if turn == 1 and "<<<FINAL_ANSWER>>>" in raw_response and "<<<ACTION>>>" not in raw_response:
-            messages.append({"role": "assistant", "content": raw_response})
-            messages.append({
-                "role": "user",
-                "content": "Voce ainda nao executou nenhum comando no sistema. Proponha um comando Bash usando <<<ACTION>>> para inspecionar os dados reais antes de concluir."
-            })
+    block = 1
+    executed_any = False
+    while True:
+        for turn in range(1, MAX_ACTION_TURNS + 1):
             raw_response = query_messages_raw(messages)
 
-        # Se o modelo concluiu a tarefa e gerou a resposta final
-        if turn > 1 and "<<<FINAL_ANSWER>>>" in raw_response:
-            final_text = raw_response.split("<<<FINAL_ANSWER>>>", 1)[1].strip()
-            print_markdown(final_text, title="Marvin · Relatório final")
-            return
+            # Se tentou adivinhar no primeiro turno sem executar comando
+            if "<<<FINAL_ANSWER>>>" in raw_response and "<<<ACTION>>>" not in raw_response and not executed_any:
+                messages.append({"role": "assistant", "content": raw_response})
+                messages.append({
+                    "role": "user",
+                    "content": "Voce ainda nao executou nenhum comando no sistema. Proponha um comando Bash usando <<<ACTION>>> para inspecionar os dados reais antes de concluir."
+                })
+                raw_response = query_messages_raw(messages)
 
-        # Extrair comando e explicacao
-        command = ""
-        explanation = ""
-        if "<<<ACTION>>>" in raw_response:
-            action_block = raw_response.split("<<<ACTION>>>", 1)[1].strip()
-            cmd_match = re.search(r"Comando:\s*(.*?)(?:\nFinalidade:|\n\n|\Z)", action_block, re.DOTALL | re.IGNORECASE)
-            exp_match = re.search(r"Finalidade:\s*(.*?)(?:\nComando:|\n\n|\Z)", action_block, re.DOTALL | re.IGNORECASE)
-            if cmd_match:
-                command = cmd_match.group(1).strip()
-            if exp_match:
-                explanation = exp_match.group(1).strip()
-        else:
-            # Fallback tolerante para outras tags
-            cmd_match = re.search(r"<<<COMMAND>>>(.*?)(?:<<<EXPLANATION.*?>|\Z)", raw_response, re.DOTALL | re.IGNORECASE)
-            exp_match = re.search(r"<<<EXPLANATION.*?>\s*(.*?)(?:<<<|\Z)", raw_response, re.DOTALL | re.IGNORECASE)
-            if cmd_match and cmd_match.group(1).strip():
-                command = cmd_match.group(1).strip()
-                explanation = exp_match.group(1).strip() if exp_match else "Executar operacao"
-            else:
-                cleaned = raw_response.replace("```bash", "").replace("```sh", "").replace("```", "").strip()
-                if cleaned.startswith(("ls", "df", "du", "cat", "uname", "ps", "find", "grep")):
-                    command = cleaned
-                    explanation = "Executar comando correspondente"
-                else:
-                    print_markdown(cleaned, title="Marvin · Resposta")
+            # Audite a conclusao: diagnosticar uma falha nao significa ter concluido a tarefa.
+            if executed_any and "<<<FINAL_ANSWER>>>" in raw_response:
+                if verify_action_completion(messages, raw_response):
+                    final_text = raw_response.split("<<<FINAL_ANSWER>>>", 1)[1].strip()
+                    print_markdown(final_text, title="Marvin · Relatório final")
                     return
+                messages.append({"role": "assistant", "content": raw_response})
+                messages.append({
+                    "role": "user",
+                    "content": (
+                        "A auditoria confirmou que a solicitacao original ainda nao foi concluida. "
+                        "Nao escreva um relatorio final. Proponha a proxima tentativa usando <<<ACTION>>>."
+                    ),
+                })
+                raw_response = query_messages_raw(messages)
+                if "<<<ACTION>>>" not in raw_response:
+                    messages.append({"role": "assistant", "content": raw_response})
+                    messages.append({
+                        "role": "user",
+                        "content": "A tarefa continua pendente. Responda somente com uma proxima acao no formato <<<ACTION>>>; nao conclua ainda.",
+                    })
+                    raw_response = query_messages_raw(messages)
+                    if "<<<ACTION>>>" not in raw_response:
+                        continue
 
-        command = re.sub(r"<<<.*?>>>", "", command).strip("` \n\r")
-        explanation = re.sub(r"<<<.*?>>>", "", explanation).strip("` \n\r")
-        if not explanation:
-            explanation = "Executar consulta no sistema"
+            # Extrair comando e explicacao
+            command = ""
+            explanation = ""
+            if "<<<ACTION>>>" in raw_response:
+                action_block = raw_response.split("<<<ACTION>>>", 1)[1].strip()
+                cmd_match = re.search(r"Comando:\s*(.*?)(?:\nFinalidade:|\n\n|\Z)", action_block, re.DOTALL | re.IGNORECASE)
+                exp_match = re.search(r"Finalidade:\s*(.*?)(?:\nComando:|\n\n|\Z)", action_block, re.DOTALL | re.IGNORECASE)
+                if cmd_match:
+                    command = cmd_match.group(1).strip()
+                if exp_match:
+                    explanation = exp_match.group(1).strip()
+            else:
+                # Fallback tolerante para outras tags
+                cmd_match = re.search(r"<<<COMMAND>>>(.*?)(?:<<<EXPLANATION.*?>|\Z)", raw_response, re.DOTALL | re.IGNORECASE)
+                exp_match = re.search(r"<<<EXPLANATION.*?>\s*(.*?)(?:<<<|\Z)", raw_response, re.DOTALL | re.IGNORECASE)
+                if cmd_match and cmd_match.group(1).strip():
+                    command = cmd_match.group(1).strip()
+                    explanation = exp_match.group(1).strip() if exp_match else "Executar operacao"
+                else:
+                    cleaned = raw_response.replace("```bash", "").replace("```sh", "").replace("```", "").strip()
+                    if cleaned.startswith(("ls", "df", "du", "cat", "uname", "ps", "find", "grep")):
+                        command = cleaned
+                        explanation = "Executar comando correspondente"
+                    else:
+                        print_markdown(cleaned, title="Marvin · Resposta")
+                        return
 
-        proposal = Text()
-        proposal.append("Finalidade: ", style="bold")
-        proposal.append(explanation + "\n")
-        proposal.append("Comando:    ", style="bold")
-        proposal.append(command, style="bright_cyan")
-        console = terminal_console()
-        console.print(Text(f"Passo {turn}/{MAX_ACTION_TURNS} · Comando proposto", style="bold cyan"))
-        console.print(proposal)
+            command = re.sub(r"<<<.*?>>>", "", command).strip("` \n\r")
+            explanation = re.sub(r"<<<.*?>>>", "", explanation).strip("` \n\r")
+            if not explanation:
+                explanation = "Executar consulta no sistema"
 
-        try:
-            confirm = input("\nDeseja executar este comando? [s/N]: ").strip().lower()
-        except (EOFError, KeyboardInterrupt):
-            terminal_console().print(Text("Operação cancelada.", style="yellow"))
-            return
-
-        if confirm not in ("s", "sim", "y", "yes"):
-            terminal_console().print(Text("Operação interrompida pelo usuário.", style="yellow"))
-            return
-
-        # Validacao de Seguranca (Safety Filter)
-        is_blocked, pattern = is_command_forbidden(command)
-        if is_blocked:
-            blocked = Text()
-            blocked.append("Comando bloqueado pelo filtro de segurança.\n", style="bold red")
-            blocked.append("Comando: ", style="bold")
-            blocked.append(command + "\n\n")
-            blocked.append("Se ainda quiser executar esta operação, rode o comando manualmente no terminal.")
+            proposal = Text()
+            proposal.append("Finalidade: ", style="bold")
+            proposal.append(explanation + "\n")
+            proposal.append("Comando:    ", style="bold")
+            proposal.append(command, style="bright_cyan")
             console = terminal_console()
-            console.print(Text("Bloqueio de segurança", style="bold red"))
-            console.print(blocked)
-            return
+            console.print(Text(f"Ciclo {block} · Passo {turn}/{MAX_ACTION_TURNS} · Comando proposto", style="bold cyan"))
+            console.print(proposal)
 
-        terminal_console().print(Text(f"Executando: {command}", style="bold cyan"))
-        try:
-            res = subprocess.run(command, shell=True, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-            stdout = res.stdout
-            stderr = res.stderr
-            returncode = res.returncode
-        except Exception as err:
-            stdout = ""
-            stderr = str(err)
-            returncode = -1
+            try:
+                confirm = input("\nDeseja executar este comando? [s/N]: ").strip().lower()
+            except (EOFError, KeyboardInterrupt):
+                terminal_console().print(Text("Operação cancelada.", style="yellow"))
+                return
 
-        if verbose:
-            output_text = stdout.rstrip()
-            if stderr.strip():
-                output_text = (output_text + "\n" if output_text else "") + "[stderr]\n" + stderr.rstrip()
-            output_text = output_text or "(sem saida)"
-        else:
-            output_text = summarize_command_output(stdout, stderr)
-        console = terminal_console()
-        output_style = "bold green" if returncode == 0 else "bold yellow"
-        output_title = f"Saída do comando · código {returncode}" + (" · completa" if verbose else " · resumo")
-        console.print(Text(output_title, style=output_style))
-        console.print(Text(output_text))
+            if confirm not in ("s", "sim", "y", "yes"):
+                terminal_console().print(Text("Operação interrompida pelo usuário.", style="yellow"))
+                return
 
-        # Truncar saidas muito extensas para poupar a janela de contexto
-        combined = (stdout + ("\n" + stderr if stderr else "")).strip()
-        lines = combined.splitlines()
-        if len(lines) > 40:
-            sample = "\n".join(lines[:35]) + f"\n... [truncado: {len(lines) - 35} linhas omitidas]"
-        else:
-            sample = combined[:2500]
+            # Validacao de Seguranca (Safety Filter)
+            is_blocked, pattern = is_command_forbidden(command)
+            if is_blocked:
+                blocked = Text()
+                blocked.append("Comando bloqueado pelo filtro de segurança.\n", style="bold red")
+                blocked.append("Comando: ", style="bold")
+                blocked.append(command + "\n\n")
+                blocked.append("Se ainda quiser executar esta operação, rode o comando manualmente no terminal.")
+                console = terminal_console()
+                console.print(Text("Bloqueio de segurança", style="bold red"))
+                console.print(blocked)
+                return
 
-        # Alimentar historico da investigacao
-        messages.append({"role": "assistant", "content": f"<<<ACTION>>>\nComando: {command}\nFinalidade: {explanation}"})
+            terminal_console().print(Text(f"Executando: {command}", style="bold cyan"))
+            try:
+                res = subprocess.run(command, shell=True, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+                stdout = res.stdout
+                stderr = res.stderr
+                returncode = res.returncode
+            except Exception as err:
+                stdout = ""
+                stderr = str(err)
+                returncode = -1
 
-        if turn == MAX_ACTION_TURNS:
-            prompt_next = (
-                f"Resultado do comando '{command}' (Codigo de retorno: {returncode}):\n{sample}\n\n"
-                "Voce atingiu o limite maximo de passos operacionais. "
-                "Responda OBRIGATORIAMENTE com <<<FINAL_ANSWER>>> sintetizando e explicando os resultados obtidos para o usuario."
-            )
-        else:
+            executed_any = True
+
+            if verbose:
+                output_text = stdout.rstrip()
+                if stderr.strip():
+                    output_text = (output_text + "\n" if output_text else "") + "[stderr]\n" + stderr.rstrip()
+                output_text = output_text or "(sem saida)"
+            else:
+                output_text = summarize_command_output(stdout, stderr)
+            console = terminal_console()
+            output_style = "bold green" if returncode == 0 else "bold yellow"
+            output_title = f"Saída do comando · código {returncode}" + (" · completa" if verbose else " · resumo")
+            console.print(Text(output_title, style=output_style))
+            console.print(Text(output_text))
+
+            # Truncar saidas muito extensas para poupar a janela de contexto
+            combined = (stdout + ("\n" + stderr if stderr else "")).strip()
+            lines = combined.splitlines()
+            if len(lines) > 40:
+                sample = "\n".join(lines[:35]) + f"\n... [truncado: {len(lines) - 35} linhas omitidas]"
+            else:
+                sample = combined[:2500]
+
+            # Alimentar historico da investigacao
+            messages.append({"role": "assistant", "content": f"<<<ACTION>>>\nComando: {command}\nFinalidade: {explanation}"})
+
             prompt_next = (
                 f"Resultado do comando '{command}' (Codigo de retorno: {returncode}):\n{sample}\n\n"
                 "Analise o resultado obtido:\n"
                 "- Se as informacoes ja forem suficientes para atender ao pedido do usuario, responda com <<<FINAL_ANSWER>>> explicando o que descobriu em detalhes.\n"
-                "- Se o comando falhou ou se voce precisa de mais informacoes para responder com precisao, responda com <<<ACTION>>> propondo o proximo comando."
+                "- Se precisar de mais informacoes, responda com <<<ACTION>>> propondo o proximo comando."
             )
-        messages.append({"role": "user", "content": prompt_next})
-        terminal_console().print(Text("Analisando o resultado...", style="dim"))
+            messages.append({"role": "user", "content": prompt_next})
+            terminal_console().print(Text("Analisando o resultado...", style="dim"))
 
-    # Se atingiu o fim dos turnos sem fechar com tag, forcar relatorio final
-    final_raw = query_messages_raw(messages)
-    final_clean = final_raw.replace("<<<FINAL_ANSWER>>>", "").strip()
-    print_markdown(final_clean, title="Marvin · Relatório final")
+        # No fim do bloco, deixe o modelo concluir ou indique que precisa de orientacao.
+        decision = query_messages_raw(messages)
+        if "<<<FINAL_ANSWER>>>" in decision:
+            if verify_action_completion(messages, decision):
+                final_text = decision.split("<<<FINAL_ANSWER>>>", 1)[1].strip()
+                print_markdown(final_text, title="Marvin · Relatório final")
+                return
+
+        messages.append({"role": "assistant", "content": decision})
+        messages.append({
+            "role": "user",
+            "content": (
+                "O bloco de comandos terminou e a solicitacao ainda nao foi concluida. "
+                "Resuma em portugues, usando apenas as evidencias obtidas: o que foi tentado, "
+                "quais erros ou resultados apareceram e quais causas sao apenas hipoteses. "
+                "Nao proponha comandos nesta resposta; explique que precisa da orientacao do usuario."
+            ),
+        })
+        help_report = query_messages_raw(messages)
+        help_report = help_report.replace("<<<FINAL_ANSWER>>>", "").replace("<<<ACTION>>>", "").strip()
+        print_markdown(help_report, title="Marvin precisa de orientação")
+        terminal_console().print(Text("Diga o que devo investigar ou digite 'encerrar' para parar.", style="dim"))
+        try:
+            guidance = input("Sua orientação: ").strip()
+        except (EOFError, KeyboardInterrupt):
+            terminal_console().print(Text("Investigação encerrada.", style="yellow"))
+            return
+
+        if not guidance or guidance.casefold() in {"encerrar", "parar", "cancelar", "sair"}:
+            terminal_console().print(Text("Investigação encerrada pelo usuário.", style="yellow"))
+            return
+
+        messages.append({"role": "assistant", "content": help_report})
+        messages.append({"role": "user", "content": f"Orientacao do usuario para continuar a investigacao: {guidance}"})
+        block += 1
 
 def stream_chat(messages, system_prompt: str = None, allow_web_search: bool = True, search_options: dict = None, render_output: bool = True) -> str:
     if allow_web_search:

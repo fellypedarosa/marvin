@@ -114,6 +114,7 @@ class MarvinCLITests(unittest.TestCase):
         model_replies = iter([
             "<<<ACTION>>>\nComando: printf seguro\nFinalidade: verificar o fluxo de teste",
             "<<<FINAL_ANSWER>>>\nComando concluído.",
+            "<<<TASK_COMPLETE>>>",
         ])
         completed = subprocess.CompletedProcess("printf seguro", 0, stdout="seguro\n", stderr="")
         output = io.StringIO()
@@ -131,6 +132,81 @@ class MarvinCLITests(unittest.TestCase):
         self.assertEqual(run_command.call_args.args[0], "printf seguro")
         self.assertIn("seguro", output.getvalue())
         self.assertIn("Comando concluído.", output.getvalue())
+
+    def test_action_mode_waits_for_guidance_and_continues_in_same_run(self):
+        replies = [
+            "<<<ACTION>>>\nComando: printf tentativa1\nFinalidade: testar a primeira tentativa",
+            "<<<ACTION>>>\nComando: printf verificar-url\nFinalidade: ainda preciso investigar",
+            "O primeiro teste foi executado. Ainda nao confirmei a causa do problema.",
+            "<<<ACTION>>>\nComando: printf tentativa2\nFinalidade: verificar a URL indicada pelo usuario",
+            "<<<FINAL_ANSWER>>>\nA verificacao solicitada foi concluida.",
+            "<<<TASK_COMPLETE>>>",
+        ]
+        query = mock.Mock(side_effect=replies)
+        completed = [
+            subprocess.CompletedProcess("printf", 0, stdout="falha observada\n", stderr=""),
+            subprocess.CompletedProcess("printf", 0, stdout="URL verificada\n", stderr=""),
+        ]
+        output = io.StringIO()
+
+        def answer_confirmation(prompt):
+            if prompt.startswith("Sua orientação"):
+                self.assertEqual(query.call_count, 3, "Marvin deve aguardar a orientacao antes de consultar o modelo novamente")
+                self.assertIn("Diga o que devo investigar", output.getvalue())
+                return "verifique se a URL esta certa"
+            return "s"
+
+        with mock.patch.object(marvin, "MAX_ACTION_TURNS", 1):
+            with mock.patch.object(marvin, "get_system_prompt", return_value="Prompt de teste"):
+                with mock.patch.object(sys, "argv", ["mvn", "-x", "clone de teste"]):
+                    with mock.patch.object(sys, "stdin", io.StringIO("")):
+                        with mock.patch.object(marvin, "query_messages_raw", query):
+                            with mock.patch("builtins.input", side_effect=answer_confirmation):
+                                with mock.patch.object(marvin.subprocess, "run", side_effect=completed) as run_command:
+                                    with contextlib.redirect_stdout(output):
+                                        marvin.main()
+
+        self.assertEqual(run_command.call_count, 2)
+        self.assertIn("Marvin precisa de orientação", output.getvalue())
+        self.assertIn("Ciclo 2", output.getvalue())
+        self.assertIn("A verificacao solicitada foi concluida.", output.getvalue())
+        resumed_messages = query.call_args_list[3].args[0]
+        self.assertTrue(any("verifique se a URL esta certa" in message["content"] for message in resumed_messages))
+
+    def test_action_mode_rejects_final_answer_when_request_is_still_incomplete(self):
+        replies = [
+            "<<<ACTION>>>\nComando: git clone https://example.org/ausente /tmp/projeto\nFinalidade: clonar o repositorio solicitado",
+            "<<<ACTION>>>\nComando: ls -la /tmp/projeto\nFinalidade: verificar se o clone criou os arquivos",
+            "<<<FINAL_ANSWER>>>\nO clone falhou; o diretorio esta vazio. Proximo passo: conferir a URL.",
+            "<<<TASK_INCOMPLETE>>>",
+            "<<<ACTION>>>\nComando: git ls-remote https://example.org/ausente\nFinalidade: verificar se a URL aponta para um repositorio acessivel",
+            "<<<ACTION>>>\nComando: printf diagnostico\nFinalidade: ainda falta uma orientacao para concluir",
+            "<<<TASK_INCOMPLETE>>>",
+            "O clone nao foi concluido. Os resultados indicam que a URL pode estar incorreta, mas isso ainda nao foi confirmado.",
+        ]
+        query = mock.Mock(side_effect=replies)
+        completed = [
+            subprocess.CompletedProcess("git clone", 128, stdout="", stderr="Repository not found"),
+            subprocess.CompletedProcess("ls", 0, stdout="total 0\n", stderr=""),
+            subprocess.CompletedProcess("git ls-remote", 128, stdout="", stderr="Repository not found"),
+            subprocess.CompletedProcess("printf", 0, stdout="diagnostico\n", stderr=""),
+        ]
+        output = io.StringIO()
+
+        with mock.patch.object(marvin, "MAX_ACTION_TURNS", 4):
+            with mock.patch.object(marvin, "get_system_prompt", return_value="Prompt de teste"):
+                with mock.patch.object(sys, "argv", ["mvn", "-x", "clone o repositorio"]):
+                    with mock.patch.object(sys, "stdin", io.StringIO("")):
+                        with mock.patch.object(marvin, "query_messages_raw", query):
+                            with mock.patch("builtins.input", side_effect=["s", "s", "s", "s", "encerrar"]):
+                                with mock.patch.object(marvin.subprocess, "run", side_effect=completed) as run_command:
+                                    with contextlib.redirect_stdout(output):
+                                        marvin.main()
+
+        self.assertEqual(run_command.call_count, 4)
+        self.assertIn("Ciclo 1 · Passo 3/4", output.getvalue())
+        self.assertIn("Marvin precisa de orientação", output.getvalue())
+        self.assertNotIn("Relatório final", output.getvalue())
 
     def test_web_question_searches_and_sends_results_to_model(self):
         search_response = io.BytesIO(json.dumps({
