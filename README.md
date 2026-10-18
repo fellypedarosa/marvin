@@ -26,6 +26,12 @@ O sistema e composto por tres componentes principais:
    - Armazenado em `~/.local/share/marvin/sessions/` em formato JSON legivel.
    - Por padrao, o Marvin e 100% stateless (nao grava nem envia historico). A memoria so e lida e persistida quando explicitamente solicitado pelo usuario (`-m` ou `-s`).
 
+4. **Pesquisa na Web (opcional)**:
+   - O modelo pode solicitar uma pesquisa quando a pergunta exigir informacoes atuais ou fontes externas.
+   - O cliente consulta a API do Tavily, devolve ate cinco resumos ao modelo e inclui os links das fontes na resposta.
+   - Configure `TAVILY_API_KEY` no ambiente do usuario para habilitar a pesquisa. Sem a chave, o Marvin informa que nao conseguiu pesquisar e responde sem alegar que consultou a web.
+   - A consulta e enviada ao servico Tavily. O modelo continua rodando localmente, mas a pesquisa nao e local. Os resultados sao resumos de busca; o Marvin nao abre automaticamente as paginas completas.
+
 ---
 
 ## 2. Guia de Uso do Comando `mvn`
@@ -67,6 +73,24 @@ cat script.py | mvn "analise a complexidade deste codigo"
 git diff | mvn "escreva uma mensagem de commit em portugues"
 journalctl -n 50 | mvn "identifique possiveis erros nestes logs"
 ```
+
+### Pesquisa na Web
+O Marvin pode pesquisar durante uma conversa quando precisar de dados atuais, como cotacoes, ou de informacoes que nao consegue confirmar apenas com o modelo local. Para termos como "agora", "hoje" e "cotacao", o cliente força a busca; em outras perguntas, o modelo pode solicitar a ferramenta. O cliente executa no maximo uma consulta por pergunta, devolve os resultados para sintese e mostra os links consultados.
+
+Para habilitar, crie uma chave de API no [Tavily](https://app.tavily.com/) e exporte-a no ambiente em que o comando `mvn` sera executado. O cliente usa o endpoint de [pesquisa da API Tavily](https://docs.tavily.com/documentation/api-reference/endpoint/search):
+
+```bash
+export TAVILY_API_KEY="sua-chave"
+```
+
+Adicione a linha ao `~/.zshrc` ou `~/.bashrc` para mante-la entre sessoes e abra um novo terminal. Nao coloque a chave no repositorio.
+
+Exemplo:
+```bash
+mvn qual e a cotacao atual do dolar em reais?
+```
+
+O Marvin deve citar os resultados numerados (`[1]`, `[2]`) e listar os links ao final. A data e hora da consulta indicam quando a busca foi feita; a data de publicacao depende do que o servico encontrar. Para cotacoes, confirme qual tipo de valor a fonte apresenta (por exemplo, compra, venda ou turismo). A busca requer internet e envia o texto da consulta ao Tavily. Sem `TAVILY_API_KEY`, o restante do chat continua funcionando, mas a pesquisa fica indisponivel.
 
 ### Modo Chat Interativo (REPL)
 Executar o comando sem argumentos e com terminal interativo inicia uma sessao de conversa continua:
