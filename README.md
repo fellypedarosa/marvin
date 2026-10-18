@@ -36,6 +36,18 @@ O sistema e composto por tres componentes principais:
 
 ---
 
+## Testes Automatizados
+
+Execute a suíte com a biblioteca `unittest` do Python:
+
+```bash
+python3 -m unittest discover -s tests -v
+```
+
+Os testes simulam as respostas do modelo e do SearXNG e usam uma pasta temporaria para as sessoes. Eles nao precisam do daemon, Docker ou acesso a internet; o caso `-x` simula tanto a confirmacao quanto a execucao do comando.
+
+O GitHub Actions executa essa mesma suíte em cada `push` e `pull_request`, usando Python 3.10 e 3.13.
+
 ## 2. Guia de Uso do Comando `mvn`
 
 ### Modo Padrao: Pergunta Direta (Stateless)

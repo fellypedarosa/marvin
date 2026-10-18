@@ -215,6 +215,22 @@ def check_status():
         print("Sugestao: inicie com 'systemctl --user start marvin'")
         return False
 
+def report_api_http_error(err: error.HTTPError):
+    try:
+        body = err.read(2000).decode("utf-8", errors="replace")
+        try:
+            payload = json.loads(body)
+            error_payload = payload.get("error") if isinstance(payload, dict) else None
+            detail = error_payload.get("message", body) if isinstance(error_payload, dict) else body
+        except json.JSONDecodeError:
+            detail = body
+        detail = re.sub(r"\s+", " ", str(detail)).strip()[:500]
+    except Exception:
+        detail = ""
+    sys.stderr.write(f"\n[Erro do modelo]: A API local respondeu HTTP {err.code} ({err.reason}).\n")
+    if detail:
+        sys.stderr.write(f"Detalhe: {detail}\n")
+
 def query_messages_raw(messages: list) -> str:
     payload = {
         "messages": messages,
@@ -231,6 +247,9 @@ def query_messages_raw(messages: list) -> str:
         with request.urlopen(req, timeout=90) as resp:
             data = json.loads(resp.read().decode("utf-8"))
             return data["choices"][0]["message"]["content"].strip()
+    except error.HTTPError as e:
+        report_api_http_error(e)
+        sys.exit(1)
     except error.URLError as e:
         sys.stderr.write(f"\n[Erro de conexao]: Nao foi possivel comunicar com o Marvin ({e.reason}).\n")
         sys.stderr.write("Verifique se o servico esta ativo executando: systemctl --user status marvin\n")
@@ -636,11 +655,14 @@ def stream_chat(messages, system_prompt: str = None, allow_web_search: bool = Tr
             search_query = latest_user_message.split("\n\nContexto / Entrada adicional:", 1)[0].strip()[:500]
             return answer_with_web_search(messages, system_prompt, search_query, search_options)
 
-    full_messages = []
+    system_instructions = []
     if system_prompt:
-        full_messages.append({"role": "system", "content": system_prompt})
+        system_instructions.append(system_prompt)
     if allow_web_search:
-        full_messages.append({"role": "system", "content": WEB_SEARCH_SYSTEM_PROMPT})
+        system_instructions.append(WEB_SEARCH_SYSTEM_PROMPT)
+    full_messages = []
+    if system_instructions:
+        full_messages.append({"role": "system", "content": "\n\n".join(system_instructions)})
     full_messages.extend(messages)
 
     payload = {
@@ -725,6 +747,9 @@ def stream_chat(messages, system_prompt: str = None, allow_web_search: bool = Tr
             else:
                 sys.stdout.write("\n")
                 sys.stdout.flush()
+    except error.HTTPError as e:
+        report_api_http_error(e)
+        sys.exit(1)
     except error.URLError as e:
         sys.stderr.write(f"\n[Erro de conexao]: Nao foi possivel comunicar com o Marvin ({e.reason}).\n")
         sys.stderr.write("Verifique se o servico esta ativo executando: systemctl --user status marvin\n")
