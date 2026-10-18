@@ -1,0 +1,20 @@
+# Modelos e binarios pesados de LLM
+*.llamafile
+*.gguf
+gaveta/
+
+# Personalidade pessoal
+system_prompt.md
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.venv/
+env/
+venv/
+
+# Logs e arquivos de sistema
+*.log
+.DS_Store

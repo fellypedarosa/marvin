@@ -1,0 +1,16 @@
+[Unit]
+Description=Marvin Local LLM Service (Qwen 3.5 2B Llamafile)
+After=network.target
+
+[Service]
+Type=simple
+WorkingDirectory=%h/marvin
+ExecStart=/bin/sh %h/marvin/Qwen3.5-2B-Q8_0.llamafile --server --host 127.0.0.1 --port 8088 -c 8192 --cont-batching
+Restart=on-failure
+RestartSec=3
+KillMode=process
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=default.target
