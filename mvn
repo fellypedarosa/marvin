@@ -14,6 +14,7 @@ from datetime import datetime
 from pathlib import Path
 from urllib import request, error, parse
 from rich.console import Console
+from rich.live import Live
 from rich.markdown import Markdown
 from rich.text import Text
 
@@ -502,15 +503,15 @@ def answer_with_web_search(messages: list, system_prompt: str, query: str, optio
         "content": WEB_SEARCH_MARKER + json.dumps({"query": query}, ensure_ascii=False),
     })
     tool_messages.append({"role": "user", "content": "Resultado da ferramenta de pesquisa:\n" + tool_result})
-    answer = stream_chat(tool_messages, system_prompt, allow_web_search=False, render_output=False)
+    answer = stream_chat(tool_messages, system_prompt, allow_web_search=False)
     if results:
-        refs = ["\nFontes consultadas:"]
+        refs = []
         for index, item in enumerate(results, 1):
             date = f" (publicado: {item['published_date']})" if item["published_date"] else ""
             refs.append(f"[{index}] {item['title']}{date} — {item['url']}")
         references = "\n".join(refs)
-        answer += references
-    print_markdown(answer)
+        answer += "\n\nFontes consultadas:\n" + references
+        print_markdown(references, title="Fontes consultadas:")
     return answer
 
 def handle_action_mode(user_instruction: str, verbose: bool = False):
@@ -716,10 +717,77 @@ def stream_chat(messages, system_prompt: str = None, allow_web_search: bool = Tr
     undecided = ""
     search_request = None
     searching = False
+    console = terminal_console() if render_output else None
+    interactive_render = bool(
+        console
+        and console.is_terminal
+        and console.is_interactive
+        and not console.is_dumb_terminal
+    )
+    status = console.status("Marvin está elaborando...", spinner="dots") if interactive_render else None
+    status_started = False
+    live = None
+    live_started = False
+
+    def stop_status():
+        nonlocal status_started
+        if status_started:
+            status.stop()
+            status_started = False
+
+    def stop_live():
+        nonlocal live_started
+        if live_started:
+            live.stop()
+            live_started = False
+
+    def live_preview(content: str) -> str:
+        """Mantem a pre-visualizacao no fim da resposta sem ocupar o scrollback."""
+        max_lines = max(8, console.size.height - 5)
+        lines = content.splitlines()
+        if len(lines) > max_lines:
+            lines = ["… resposta em andamento …"] + lines[-(max_lines - 1):]
+        preview = "\n".join(lines)
+        max_chars = max(1200, console.size.width * max_lines)
+        if len(preview) > max_chars:
+            preview = "… resposta em andamento …\n" + preview[-max_chars:]
+        return preview
+
+    if interactive_render:
+        status.start()
+        status_started = True
 
     def emit(text: str):
+        nonlocal live, live_started
         if text:
             complete_reply.append(text)
+            if not render_output:
+                return
+            if not interactive_render:
+                return
+            stop_status()
+            if live is None:
+                live = Live(
+                    Markdown(""),
+                    console=console,
+                    refresh_per_second=4,
+                    transient=True,
+                    vertical_overflow="ellipsis",
+                    redirect_stdout=False,
+                    redirect_stderr=False,
+                )
+                live.start(refresh=True)
+                live_started = True
+            live.update(Markdown(live_preview("".join(complete_reply))))
+
+    def close_progress(show_partial: bool = False):
+        stop_status()
+        had_live = live_started
+        stop_live()
+        if show_partial and render_output and complete_reply:
+            # Live previews sao transientes; imprime a parte recebida se a conexao falhar.
+            if had_live or not interactive_render:
+                print_markdown("".join(complete_reply))
 
     try:
         with request.urlopen(req, timeout=120) as resp:
@@ -758,6 +826,7 @@ def stream_chat(messages, system_prompt: str = None, allow_web_search: bool = Tr
             if not searching and undecided:
                 emit(undecided)
             if searching:
+                close_progress()
                 try:
                     request_data = json.loads((search_request or "").strip())
                     search_query = str(request_data.get("query", "")).strip()
@@ -777,16 +846,21 @@ def stream_chat(messages, system_prompt: str = None, allow_web_search: bool = Tr
                     },
                 )
                 complete_reply = [answer]
-            elif render_output and complete_reply:
-                print_markdown("".join(complete_reply))
+            else:
+                close_progress()
+                if render_output and complete_reply:
+                    print_markdown("".join(complete_reply))
     except error.HTTPError as e:
+        close_progress(show_partial=True)
         report_api_http_error(e)
         sys.exit(1)
     except error.URLError as e:
+        close_progress(show_partial=True)
         sys.stderr.write(f"\n[Erro de conexao]: Nao foi possivel comunicar com o Marvin ({e.reason}).\n")
         sys.stderr.write("Verifique se o servico esta ativo executando: systemctl --user status marvin\n")
         sys.exit(1)
     except Exception as e:
+        close_progress(show_partial=True)
         sys.stderr.write(f"\n[Erro inesperado]: {e}\n")
         sys.exit(1)
 
