@@ -3,6 +3,7 @@
 Marvin e um assistente pessoal local executado diretamente no terminal via comando `mvn`. Ele opera sobre o modelo `Qwen3.5-2B-Q8_0.llamafile`, rodando em segundo plano como um servico de usuario do systemd, sem interface grafica, sem navegadores e com desempenho maximo sem limitacoes artificiais de CPU ou memoria.
 
 ---
+<img width="610" height="666" alt="bash" src="https://github.com/user-attachments/assets/b955ea2f-3ae0-476b-a1a5-73543a997e9d" />
 
 ## 1. Arquitetura
 
