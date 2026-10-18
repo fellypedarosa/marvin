@@ -52,6 +52,27 @@ Execute a suite com a biblioteca `unittest` do Python:
 python3 -m unittest discover -s tests -v
 ```
 
+A mesma suíte verifica se arquivos públicos ou ainda não ignorados contêm
+padrões de credenciais, dados pessoais ou endereços de rede privados. O
+relatório mostra apenas o arquivo, a linha e a categoria detectada, sem imprimir
+o conteúdo encontrado. O arquivo `system_prompt.md`, que pode conter instruções
+pessoais, deve permanecer fora do Git; use `system_prompt.example.md` como
+modelo público. Essa verificação cobre o conteúdo atual da árvore de trabalho,
+não o histórico de commits. Para procurar segredos no histórico, use um scanner
+dedicado como o Gitleaks e habilite a proteção de envio do GitHub.
+
+### Configuracao local do SearXNG
+
+O Compose carrega automaticamente as variaveis do arquivo `.env`. Em um clone
+novo, crie-o a partir do modelo e ajuste o valor para sua instalacao:
+
+```bash
+cp .env.example .env
+```
+
+O arquivo `.env` e ignorado pelo Git. Mantenha nele os valores locais; o
+`.env.example` e apenas uma referencia versionada.
+
 Os testes simulam as respostas do modelo e do SearXNG e usam uma pasta temporaria para as sessoes. Eles nao precisam do daemon, Docker ou acesso a internet; o caso `-x` simula tanto a confirmacao quanto a execucao do comando.
 
 O GitHub Actions executa essa mesma suíte em cada `push` e `pull_request`, usando Python 3.10 e 3.13.

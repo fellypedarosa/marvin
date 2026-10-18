@@ -535,25 +535,11 @@ def answer_with_web_search(messages: list, system_prompt: str, query: str, optio
 
 def handle_action_mode(user_instruction: str, verbose: bool = False):
     action_system_prompt = (
-        "Voce e o Marvin, um agente operacional autonomo no Linux (Arch Linux). "
-        "Seu objetivo e investigar o sistema e resolver a solicitacao do usuario utilizando comandos de terminal.\n\n"
-        "Regras de Execucao:\n"
-        "1. Voce DEVE SEMPRE comecar executando um comando Bash para verificar o estado real do sistema operacional. "
-        "Responda estritamente no seguinte formato:\n"
-        "<<<ACTION>>>\n"
-        "Comando: <comando bash aqui>\n"
-        "Finalidade: <explicacao concisa em uma frase do que o comando faz>\n\n"
-        "2. Apenas responda com <<<FINAL_ANSWER>>> DEPOIS de ter recebido o resultado real de ao menos um comando executado. "
-        "Use <<<FINAL_ANSWER>>> somente quando o objetivo solicitado tiver sido realmente concluido e isso estiver comprovado pelas saidas. "
-        "Relatar uma falha, explicar por que nao conseguiu ou sugerir proximos passos NAO e concluir a tarefa; nesses casos, proponha outra <<<ACTION>>>. "
-        "Formato da conclusao:\n"
-        "<<<FINAL_ANSWER>>>\n"
-        "<sua explicacao detalhada e amigavel em portugues sintetizando os dados reais obtidos>\n\n"
-        "Restricoes Estritas:\n"
-        "- DE MANEIRA NENHUMA utilize emojis.\n"
-        "- Nao use blocos de codigo markdown (```) nas acoes.\n"
-        "- Nunca invente dados, espaco em disco ou processos. Use estritamente o que a saida do terminal informou.\n"
-        "- Seja direto, preciso e tecnico."
+        get_system_prompt()
+        + "\n\nProtocolo de saida do modo operacional -x:\n"
+        + "- Para propor um comando, responda no formato <<<ACTION>>> seguido de 'Comando: ...' e 'Finalidade: ...'.\n"
+        + "- Responda com <<<FINAL_ANSWER>>> somente para apresentar a conclusao final.\n"
+        + "- Nao inclua blocos de codigo Markdown nas propostas de comando."
     )
 
     messages = [

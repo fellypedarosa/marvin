@@ -7,6 +7,6 @@ services:
       - "127.0.0.1:8888:8080"
     environment:
       SEARXNG_BASE_URL: http://127.0.0.1:8888/
-      SEARXNG_SECRET: marvin-local-searxng-secret-change-before-exposing
+      SEARXNG_SECRET: ${SEARXNG_SECRET:?Defina SEARXNG_SECRET no arquivo .env}
     volumes:
       - ./searxng/settings.yml:/etc/searxng/settings.yml:ro
