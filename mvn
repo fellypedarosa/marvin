@@ -191,12 +191,9 @@ def check_status():
         print("Sugestao: inicie com 'systemctl --user start marvin'")
         return False
 
-def query_model_raw(prompt: str, system_prompt: str) -> str:
+def query_messages_raw(messages: list) -> str:
     payload = {
-        "messages": [
-            {"role": "system", "content": system_prompt},
-            {"role": "user", "content": prompt}
-        ],
+        "messages": messages,
         "stream": False,
         "temperature": 0.2,
     }
@@ -218,80 +215,177 @@ def query_model_raw(prompt: str, system_prompt: str) -> str:
         sys.stderr.write(f"\n[Erro inesperado]: {e}\n")
         sys.exit(1)
 
+MAX_ACTION_TURNS = 4
+
 def handle_action_mode(user_instruction: str):
     action_system_prompt = (
-        "Voce e o Marvin em modo de execucao operacional no Linux. "
-        "Sua tarefa e gerar EXCLUSIVAMENTE o comando de terminal Bash necessario para atender ao pedido do usuario. "
-        "Responda estritamente no seguinte formato estruturado:\n"
-        "<<<COMMAND>>>\n"
-        "<comando bash de uma ou mais linhas>\n"
-        "<<<EXPLANATION>>>\n"
-        "<explicacao concisa em uma frase em portugues>\n\n"
-        "Regras estritas:\n"
-        "- Nao use blocos markdown (```).\n"
-        "- De maneira nenhuma utilize emojis.\n"
-        "- Nao escreva preambulos nem texto fora das tags especificadas."
+        "Voce e o Marvin, um agente operacional autonomo no Linux (Arch Linux). "
+        "Seu objetivo e investigar o sistema e resolver a solicitacao do usuario utilizando comandos de terminal.\n\n"
+        "Regras de Execucao:\n"
+        "1. Voce DEVE SEMPRE comecar executando um comando Bash para verificar o estado real do sistema operacional. "
+        "Responda estritamente no seguinte formato:\n"
+        "<<<ACTION>>>\n"
+        "Comando: <comando bash aqui>\n"
+        "Finalidade: <explicacao concisa em uma frase do que o comando faz>\n\n"
+        "2. Apenas responda com <<<FINAL_ANSWER>>> DEPOIS de ter recebido o resultado real de ao menos um comando executado. "
+        "Formato da conclusao:\n"
+        "<<<FINAL_ANSWER>>>\n"
+        "<sua explicacao detalhada e amigavel em portugues sintetizando os dados reais obtidos>\n\n"
+        "Restricoes Estritas:\n"
+        "- DE MANEIRA NENHUMA utilize emojis.\n"
+        "- Nao use blocos de codigo markdown (```) nas acoes.\n"
+        "- Nunca invente dados, espaco em disco ou processos. Use estritamente o que a saida do terminal informou.\n"
+        "- Seja direto, preciso e tecnico."
     )
 
-    print("[Marvin]: Analisando pedido e gerando comando...")
-    raw_response = query_model_raw(user_instruction, action_system_prompt)
+    messages = [
+        {"role": "system", "content": action_system_prompt},
+        {"role": "user", "content": f"Solicitacao do usuario: {user_instruction}"}
+    ]
 
-    cmd_match = re.search(r"<<<COMMAND>>>(.*?)(?:<<<EXPLANATION.*?>|\Z)", raw_response, re.DOTALL | re.IGNORECASE)
-    exp_match = re.search(r"<<<EXPLANATION.*?>\s*(.*?)(?:<<<|\Z)", raw_response, re.DOTALL | re.IGNORECASE)
+    print("[Marvin]: Iniciando investigacao operacional...")
 
-    if cmd_match and cmd_match.group(1).strip():
-        command = cmd_match.group(1).strip()
-        explanation = exp_match.group(1).strip() if exp_match and exp_match.group(1).strip() else "Executar operacao solicitada"
-    else:
-        # Fallback limpo caso o modelo omita as tags
-        cleaned = raw_response.replace("```bash", "").replace("```sh", "").replace("```", "").strip()
-        command = cleaned
-        explanation = "Executar comando correspondente"
+    for turn in range(1, MAX_ACTION_TURNS + 1):
+        raw_response = query_messages_raw(messages)
 
-    # Limpeza de formatacao residual
-    command = re.sub(r"<<<.*?>>>", "", command).strip("` \n\r")
-    explanation = re.sub(r"<<<.*?>>>", "", explanation).strip("` \n\r")
+        # Se tentou adivinhar no primeiro turno sem executar comando
+        if turn == 1 and "<<<FINAL_ANSWER>>>" in raw_response and "<<<ACTION>>>" not in raw_response:
+            messages.append({"role": "assistant", "content": raw_response})
+            messages.append({
+                "role": "user",
+                "content": "Voce ainda nao executou nenhum comando no sistema. Proponha um comando Bash usando <<<ACTION>>> para inspecionar os dados reais antes de concluir."
+            })
+            raw_response = query_messages_raw(messages)
 
-    print("\n" + "=" * 55)
-    print(f"[Marvin propos a seguinte acao]:")
-    print(f"  Finalidade: {explanation}")
-    print(f"  Comando:    {command}")
-    print("=" * 55)
+        # Se o modelo concluiu a tarefa e gerou a resposta final
+        if turn > 1 and "<<<FINAL_ANSWER>>>" in raw_response:
+            final_text = raw_response.split("<<<FINAL_ANSWER>>>", 1)[1].strip()
+            print("\n" + "=" * 55)
+            print("[Marvin - Relatorio Final]:")
+            print(final_text)
+            print("=" * 55)
+            return
 
-    try:
-        confirm = input("\nDeseja executar este comando? [s/N]: ").strip().lower()
-    except (EOFError, KeyboardInterrupt):
-        print("\n[Acao cancelada]")
-        return
-
-    if confirm not in ("s", "sim", "y", "yes"):
-        print("[Acao cancelada pelo usuario]")
-        return
-
-    # Validacao de Seguranca (Safety Filter)
-    is_blocked, pattern = is_command_forbidden(command)
-    if is_blocked:
-        print("\n" + "!" * 55)
-        print("[Bloqueio de Seguranca]:")
-        print(f"Tentei executar o comando: {command}")
-        print("Esse comando esbarrou em uma protecao de seguranca interna do Marvin (padrao restrito detectado).")
-        print("Como o Marvin nao tem permissao para rodar essa operacao automaticamente, se voce realmente desejar executa-la, execute manualmente no seu terminal:")
-        print(f"\n  {command}\n")
-        print("!" * 55)
-        return
-
-    # Execucao do comando seguro
-    print(f"\n[Executando]: {command}")
-    print("-" * 55)
-    try:
-        ret = subprocess.run(command, shell=True)
-        print("-" * 55)
-        if ret.returncode == 0:
-            print("[Comando concluido com sucesso]")
+        # Extrair comando e explicacao
+        command = ""
+        explanation = ""
+        if "<<<ACTION>>>" in raw_response:
+            action_block = raw_response.split("<<<ACTION>>>", 1)[1].strip()
+            cmd_match = re.search(r"Comando:\s*(.*?)(?:\nFinalidade:|\n\n|\Z)", action_block, re.DOTALL | re.IGNORECASE)
+            exp_match = re.search(r"Finalidade:\s*(.*?)(?:\nComando:|\n\n|\Z)", action_block, re.DOTALL | re.IGNORECASE)
+            if cmd_match:
+                command = cmd_match.group(1).strip()
+            if exp_match:
+                explanation = exp_match.group(1).strip()
         else:
-            print(f"[Comando finalizado com codigo de retorno {ret.returncode}]")
-    except Exception as err:
-        print(f"[Erro na execucao]: {err}")
+            # Fallback tolerante para outras tags
+            cmd_match = re.search(r"<<<COMMAND>>>(.*?)(?:<<<EXPLANATION.*?>|\Z)", raw_response, re.DOTALL | re.IGNORECASE)
+            exp_match = re.search(r"<<<EXPLANATION.*?>\s*(.*?)(?:<<<|\Z)", raw_response, re.DOTALL | re.IGNORECASE)
+            if cmd_match and cmd_match.group(1).strip():
+                command = cmd_match.group(1).strip()
+                explanation = exp_match.group(1).strip() if exp_match else "Executar operacao"
+            else:
+                cleaned = raw_response.replace("```bash", "").replace("```sh", "").replace("```", "").strip()
+                if cleaned.startswith(("ls", "df", "du", "cat", "uname", "ps", "find", "grep")):
+                    command = cleaned
+                    explanation = "Executar comando correspondente"
+                else:
+                    print("\n" + "=" * 55)
+                    print("[Marvin - Relatorio Final]:")
+                    print(cleaned)
+                    print("=" * 55)
+                    return
+
+        command = re.sub(r"<<<.*?>>>", "", command).strip("` \n\r")
+        explanation = re.sub(r"<<<.*?>>>", "", explanation).strip("` \n\r")
+        if not explanation:
+            explanation = "Executar consulta no sistema"
+
+        print("\n" + "=" * 55)
+        print(f"[Passo {turn}/{MAX_ACTION_TURNS}] Marvin propos:")
+        print(f"  Finalidade: {explanation}")
+        print(f"  Comando:    {command}")
+        print("=" * 55)
+
+        try:
+            confirm = input("\nDeseja executar este comando? [s/N]: ").strip().lower()
+        except (EOFError, KeyboardInterrupt):
+            print("\n[Operacao cancelada]")
+            return
+
+        if confirm not in ("s", "sim", "y", "yes"):
+            print("[Operacao interrompida pelo usuario]")
+            return
+
+        # Validacao de Seguranca (Safety Filter)
+        is_blocked, pattern = is_command_forbidden(command)
+        if is_blocked:
+            print("\n" + "!" * 55)
+            print("[Bloqueio de Seguranca]:")
+            print(f"Tentei executar o comando: {command}")
+            print("Esse comando esbarrou em uma protecao de seguranca interna do Marvin (padrao restrito detectado).")
+            print("Como o Marvin nao tem permissao para rodar essa operacao automaticamente, se voce realmente desejar executa-la, execute manualmente no seu terminal:")
+            print(f"\n  {command}\n")
+            print("!" * 55)
+            return
+
+        # Execucao do comando com captura completa de saida
+        print(f"\n[Executando]: {command}")
+        print("-" * 55)
+        try:
+            res = subprocess.run(command, shell=True, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+            stdout = res.stdout
+            stderr = res.stderr
+            returncode = res.returncode
+        except Exception as err:
+            stdout = ""
+            stderr = str(err)
+            returncode = -1
+
+        if stdout:
+            sys.stdout.write(stdout)
+            if not stdout.endswith("\n"):
+                sys.stdout.write("\n")
+        if stderr:
+            sys.stderr.write(f"[stderr]: {stderr}")
+            if not stderr.endswith("\n"):
+                sys.stderr.write("\n")
+        print("-" * 55)
+
+        # Truncar saidas muito extensas para poupar a janela de contexto
+        combined = (stdout + ("\n" + stderr if stderr else "")).strip()
+        lines = combined.splitlines()
+        if len(lines) > 40:
+            sample = "\n".join(lines[:35]) + f"\n... [truncado: {len(lines) - 35} linhas omitidas]"
+        else:
+            sample = combined[:2500]
+
+        # Alimentar historico da investigacao
+        messages.append({"role": "assistant", "content": f"<<<ACTION>>>\nComando: {command}\nFinalidade: {explanation}"})
+
+        if turn == MAX_ACTION_TURNS:
+            prompt_next = (
+                f"Resultado do comando '{command}' (Codigo de retorno: {returncode}):\n{sample}\n\n"
+                "Voce atingiu o limite maximo de passos operacionais. "
+                "Responda OBRIGATORIAMENTE com <<<FINAL_ANSWER>>> sintetizando e explicando os resultados obtidos para o usuario."
+            )
+        else:
+            prompt_next = (
+                f"Resultado do comando '{command}' (Codigo de retorno: {returncode}):\n{sample}\n\n"
+                "Analise o resultado obtido:\n"
+                "- Se as informacoes ja forem suficientes para atender ao pedido do usuario, responda com <<<FINAL_ANSWER>>> explicando o que descobriu em detalhes.\n"
+                "- Se o comando falhou ou se voce precisa de mais informacoes para responder com precisao, responda com <<<ACTION>>> propondo o proximo comando."
+            )
+        messages.append({"role": "user", "content": prompt_next})
+        print("[Marvin]: Analisando o resultado...")
+
+    # Se atingiu o fim dos turnos sem fechar com tag, forcar relatorio final
+    final_raw = query_messages_raw(messages)
+    final_clean = final_raw.replace("<<<FINAL_ANSWER>>>", "").strip()
+    print("\n" + "=" * 55)
+    print("[Marvin - Relatorio Final]:")
+    print(final_clean)
+    print("=" * 55)
 
 def stream_chat(messages, system_prompt: str = None) -> str:
     full_messages = []

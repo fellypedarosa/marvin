@@ -76,19 +76,23 @@ mvn -s projeto      # Chat interativo persistindo na sessao 'projeto'
 ```
 Para sair do chat interativo, digite `sair`, `exit` ou pressione `Ctrl+C`. No modo interativo, voce tambem pode usar `/x <pedido>` para disparar acoes operacionais.
 
-### Modo Operacional: Execucao de Comandos com Seguranca (`-x`)
-Permite solicitar acoes no sistema operacional em linguagem natural. O Marvin traduz a instrucao para o comando Bash exato e exige sua confirmacao previa antes de qualquer execucao:
+### Modo Operacional: Agente Iterativo com Seguranca (`-x`)
+Permite solicitar investigacoes e tarefas no sistema operacional em linguagem natural. O Marvin opera em um ciclo iterativo do tipo **ReAct (Reason + Act + Observe)**, propondo comandos, analisando a saida real do terminal e sintetizando um relatorio final:
 
 ```bash
-mvn -x verifique o uso de memoria ram
-mvn -x crie a pasta /tmp/projeto e entre nela
+mvn -x verifique o espaco livre no /home e qual o maior diretorio
+mvn -x investigue a particao com maior ocupacao e detalhe o consumo
+mvn -x crie a pasta /tmp/projeto e clone o repositorio https://...
 ```
 
-Mecanismo de Protecao:
-1. O Marvin exibe a finalidade e o comando exato no terminal.
-2. O script pausa obrigatoriamente e solicita sua confirmacao (`[s/N]`).
-3. Se confirmado, o comando e validado contra o **Filtro de Seguranca (Safety Filter)**, que bloqueia acoes de alto risco (como `rm -rf /`, `mkfs`, `dd`, `reboot`, modificacoes destrutivas de permissoes, etc.).
-4. Se o comando for bloqueado pela politica de seguranca, o Marvin explica o motivo e exibe a sintaxe para que voce execute manualmente se desejar.
+Como Funciona o Ciclo de Execucao:
+1. **Inspecao e Acao**: O Marvin analisa o pedido e propoe o comando Bash exato, descrevendo a finalidade.
+2. **Confirmacao Humana**: O terminal pausa e solicita sua autorizacao previa (`[s/N]`).
+3. **Filtro de Seguranca**: Se confirmado, o comando e inspecionado contra o Safety Filter (bloqueia comandos destrutivos como `rm -rf /`, `mkfs`, `dd`, `reboot`, etc.).
+4. **Execucao e Feedback**: O script executa o comando aprovado, exibe a saida no terminal e entrega o retorno bruto para o Marvin como contexto.
+5. **Decisao Multi-Passo**: Com base na saida real do sistema, o Marvin decide autonomamente:
+   - Se precisa de outro comando para aprofundar ou corrigir a busca (ate o limite seguro de 4 turnos);
+   - Ou se ja tem dados suficientes para entregar o **Relatorio Final** detalhado em linguagem natural.
 
 ### Personalidade e Regras de Comportamento
 O Marvin carrega suas instrucoes mestras diretamente do arquivo:
