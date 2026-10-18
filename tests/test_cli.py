@@ -173,6 +173,38 @@ class MarvinCLITests(unittest.TestCase):
         resumed_messages = query.call_args_list[3].args[0]
         self.assertTrue(any("verifique se a URL esta certa" in message["content"] for message in resumed_messages))
 
+    def test_action_mode_stops_when_user_ends_after_cycle(self):
+        replies = [
+            "<<<ACTION>>>\nComando: printf tentativa\nFinalidade: executar uma tentativa",
+            "<<<ACTION>>>\nComando: printf proxima\nFinalidade: ainda preciso investigar",
+            "Ainda nao consegui concluir. O resultado nao confirma a causa do problema.",
+        ]
+        query = mock.Mock(side_effect=replies)
+        completed = subprocess.CompletedProcess("printf tentativa", 0, stdout="resultado parcial\n", stderr="")
+        output = io.StringIO()
+
+        def answer_confirmation(prompt):
+            if prompt.startswith("Sua orientação"):
+                self.assertEqual(query.call_count, 3, "A execucao deve aguardar a resposta antes de continuar")
+                self.assertIn("Diga o que devo investigar", output.getvalue())
+                return "encerrar"
+            return "s"
+
+        with mock.patch.object(marvin, "MAX_ACTION_TURNS", 1):
+            with mock.patch.object(marvin, "get_system_prompt", return_value="Prompt de teste"):
+                with mock.patch.object(sys, "argv", ["mvn", "-x", "investigue uma falha"]):
+                    with mock.patch.object(sys, "stdin", io.StringIO("")):
+                        with mock.patch.object(marvin, "query_messages_raw", query):
+                            with mock.patch("builtins.input", side_effect=answer_confirmation):
+                                with mock.patch.object(marvin.subprocess, "run", return_value=completed) as run_command:
+                                    with contextlib.redirect_stdout(output):
+                                        marvin.main()
+
+        run_command.assert_called_once()
+        self.assertEqual(query.call_count, 3, "Nao deve consultar o modelo depois que o usuario encerra")
+        self.assertIn("Investigação encerrada pelo usuário.", output.getvalue())
+        self.assertNotIn("Ciclo 2", output.getvalue())
+
     def test_action_mode_rejects_final_answer_when_request_is_still_incomplete(self):
         replies = [
             "<<<ACTION>>>\nComando: git clone https://example.org/ausente /tmp/projeto\nFinalidade: clonar o repositorio solicitado",
