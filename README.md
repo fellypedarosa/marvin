@@ -25,12 +25,14 @@ O sistema e composto por tres componentes principais:
 3. **Armazenamento de Memoria**:
    - Armazenado em `~/.local/share/marvin/sessions/` em formato JSON legivel.
    - Por padrao, o Marvin e 100% stateless (nao grava nem envia historico). A memoria so e lida e persistida quando explicitamente solicitado pelo usuario (`-m` ou `-s`).
+   - Sessoes persistidas retêm no maximo 30 mensagens (normalmente 15 trocas) e 12.000 caracteres, removendo as trocas mais antigas para limitar o contexto enviado ao modelo e o crescimento dos arquivos.
 
 4. **Pesquisa na Web (opcional)**:
    - O modelo pode solicitar uma pesquisa quando a pergunta exigir informacoes atuais ou fontes externas.
-   - O cliente consulta uma instancia local do SearXNG, devolve ate cinco resumos ao modelo e inclui os links das fontes na resposta.
+   - O cliente consulta uma instancia local do SearXNG, devolve ate cinco resultados ao modelo e tenta extrair o texto das tres primeiras paginas publicas para fundamentar melhor a resposta. Se a extração falhar, usa o resumo do resultado.
    - O SearXNG e software livre e nao exige conta, chave de API ou pagamento por consulta. Os mecanismos de busca agregados podem aplicar seus proprios limites.
-   - A instancia fica vinculada a `127.0.0.1:8888`. As consultas sao encaminhadas pelo SearXNG aos mecanismos externos configurados; o modelo continua rodando localmente. Os resultados sao resumos de busca; o Marvin nao abre automaticamente as paginas completas.
+   - Google e Bing recebem peso maior na ordenacao; os demais mecanismos ativos continuam disponiveis como fontes adicionais. O Marvin informa no contexto quando o SearXNG reporta mecanismos sem resposta.
+   - A instancia fica vinculada a `127.0.0.1:8888`. As consultas sao encaminhadas pelo SearXNG aos mecanismos externos configurados; o modelo continua rodando localmente. O cliente tenta abrir e extrair texto de ate tres paginas HTML publicas.
 
 ---
 
@@ -75,7 +77,7 @@ journalctl -n 50 | mvn "identifique possiveis erros nestes logs"
 ```
 
 ### Pesquisa na Web
-O Marvin pode pesquisar durante uma conversa quando precisar de dados atuais, como cotacoes, ou de informacoes que nao consegue confirmar apenas com o modelo local. Para termos como "agora", "hoje" e "cotacao", o cliente força a busca; em outras perguntas, o modelo pode solicitar a ferramenta. O cliente executa no maximo uma consulta por pergunta, devolve os resultados para sintese e mostra os links consultados.
+O Marvin pode pesquisar durante uma conversa quando precisar de dados atuais, como cotacoes, ou de informacoes que nao consegue confirmar apenas com o modelo local. Para termos como "agora", "hoje", "mais recente" e "versao atual", o cliente força a busca; em outras perguntas, o modelo pode solicitar a ferramenta. Tambem e possivel forcar ou desativar a pesquisa por pergunta. O cliente executa no maximo uma consulta, tenta extrair o conteudo das tres primeiras paginas e mostra os links consultados.
 
 O Marvin usa o [SearXNG](https://github.com/searxng/searxng), um metabuscador de codigo aberto, executado localmente via Docker Compose. E necessario ter Docker Engine com o plugin Compose instalado. Nao e necessario criar conta nem configurar chave de API ou pagar por consulta ao SearXNG. Ele encaminha as consultas aos mecanismos externos; esses mecanismos podem limitar ou bloquear requisicoes.
 
@@ -92,9 +94,15 @@ curl -fsS 'http://127.0.0.1:8888/search?q=teste&format=json' | head
 Exemplo:
 ```bash
 mvn qual e a cotacao atual do dolar em reais?
+mvn --web-search como configurar o recurso mais recente do Python
+mvn --web-search --search-category it --search-time-range month "mudancas recentes na API do FastAPI"
+mvn --web-search --search-engines google,bing "documentacao oficial do systemd user service"
+mvn --no-web-search "explique o que e uma closure em Python"
 ```
 
-O Marvin deve citar os resultados numerados (`[1]`, `[2]`) e listar os links ao final. A data e hora da consulta indicam quando a busca foi feita; a data de publicacao depende do que os mecanismos retornarem. Para cotacoes, confirme qual tipo de valor a fonte apresenta (por exemplo, compra, venda ou turismo). A busca requer internet. Para parar o SearXNG, execute `docker compose down`.
+Opcoes disponiveis: `--web-search` forca a pesquisa; `--no-web-search` a desativa; `--search-engines` escolhe mecanismos separados por virgula; `--search-category` aceita `general`, `it`, `news`, `science`, `files`, `images`, `videos`, `music` ou `map`; `--search-time-range` aceita `day`, `week`, `month` ou `year`. Sem uma escolha explicita de mecanismos, o SearXNG usa os mecanismos configurados e disponiveis. Os filtros de categoria e periodo dependem do suporte dos motores selecionados.
+
+O Marvin deve citar os resultados numerados (`[1]`, `[2]`) e listar os links ao final. A data e hora da consulta indicam quando a busca foi feita; a data de publicacao depende do que os mecanismos retornarem. A extracao de paginas e limitada a HTML publico, nao segue instrucoes encontradas no conteudo e pode falhar em sites que bloqueiam acesso automatizado. Para cotacoes, confirme qual tipo de valor a fonte apresenta (por exemplo, compra, venda ou turismo). A busca requer internet. Para parar o SearXNG, execute `docker compose down`.
 
 O formato JSON precisa estar habilitado no SearXNG para a integracao funcionar; a configuracao fornecida ja faz isso. A [API do SearXNG](https://docs.searxng.org/dev/search_api.html) documenta o parametro `format=json` e observa que cada instancia deve habilitar explicitamente os formatos que aceita.
 
@@ -106,6 +114,8 @@ mvn -m              # Chat interativo persistindo na memoria padrao
 mvn -s projeto      # Chat interativo persistindo na sessao 'projeto'
 ```
 Para sair do chat interativo, digite `sair`, `exit` ou pressione `Ctrl+C`. No modo interativo, voce tambem pode usar `/x <pedido>` para disparar acoes operacionais.
+
+No chat interativo, `/web <pergunta>` força a busca e `/no-web <pergunta>` responde sem pesquisar naquela troca.
 
 ### Modo Operacional: Agente Iterativo com Seguranca (`-x`)
 Permite solicitar investigacoes e tarefas no sistema operacional em linguagem natural. O Marvin opera em um ciclo iterativo do tipo **ReAct (Reason + Act + Observe)**, propondo comandos, analisando a saida real do terminal e sintetizando um relatorio final:
@@ -200,6 +210,10 @@ Caso deseje alterar o host ou porta padrao, defina no seu `.zshrc` ou `.bashrc`:
 ```bash
 export MARVIN_HOST="127.0.0.1"
 export MARVIN_PORT="8088"
+export MARVIN_SEARCH_LANGUAGE="pt-BR"
+# Opcionais: restringir os mecanismos e as categorias usadas por padrao
+export MARVIN_SEARCH_ENGINES="google,bing"
+export MARVIN_SEARCH_CATEGORIES="general"
 ```
 
 ---

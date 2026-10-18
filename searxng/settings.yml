@@ -7,3 +7,13 @@ search:
   formats:
     - html
     - json
+
+# Prioriza mecanismos abrangentes; os demais mecanismos ativos seguem como
+# fontes adicionais e alternativas.
+engines:
+  - name: google
+    disabled: false
+    weight: 1.4
+  - name: bing
+    disabled: false
+    weight: 1.3
