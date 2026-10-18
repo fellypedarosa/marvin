@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 import sys
 import os
+import re
 import json
 import argparse
 import signal
@@ -29,11 +30,39 @@ Regras de Comportamento Obrigatorias:
 - Estilo: Seja tecnico, direto e conciso. Va direto ao ponto e evite preambulos ou enrolacoes.
 - Ambiente: Priorize comandos, ferramentas e praticas modernas compativeis com Linux."""
 
+# Padroes estritamente proibidos de execucao automatica (Safety Filter)
+FORBIDDEN_PATTERNS = [
+    r"\brm\s+-[rRfF]*\s+/(?:\s|$)",             # rm -rf /
+    r"\brm\s+-[rRfF]*\s+/\*",                   # rm -rf /*
+    r"\brm\s+-[rRfF]*\s+~(?:\s|/|$)",           # rm -rf ~
+    r"\brm\s+-[rRfF]*\s+\$HOME(?:\s|/|$)",      # rm -rf $HOME
+    r"\brm\s+-[rRfF]*\s+\*(?:\s|$)",            # rm -rf *
+    r"\bmkfs(?:\.[a-z0-9]+)?\b",                # formatacao de disco
+    r"\bfdisk\b",                               # particionamento
+    r"\bparted\b",                              # particionamento
+    r"\bwipefs\b",                              # limpeza de disco
+    r"\bdd\s+if=",                              # gravacao direta dd
+    r":\(\)\s*\{\s*:\s*\|\s*:\s*&\s*\}\s*;\s*:", # fork bomb
+    r"\bchmod\s+-[rRfF]*\s+777\s+/",            # chmod 777 na raiz
+    r"\bchown\s+-[rRfF]*\s+.*\s+/",             # chown na raiz
+    r">\s*/dev/sd[a-z]",                        # sobrescrita de disco
+    r">\s*/dev/nvme[0-9]",                      # sobrescrita de disco
+    r"\b(shutdown|reboot|poweroff|init\s+[06])\b", # desligamento/reinicio
+    r"\bkillall\s+-9\s+(systemd|init|Xorg|wayland|dbus-daemon)\b", # matar processos vitais
+]
+
 def sigint_handler(signum, frame):
     sys.stdout.write("\n[Interrompido pelo usuario]\n")
     sys.exit(0)
 
 signal.signal(signal.SIGINT, sigint_handler)
+
+def is_command_forbidden(cmd: str) -> tuple[bool, str]:
+    cmd_clean = cmd.strip()
+    for pattern in FORBIDDEN_PATTERNS:
+        if re.search(pattern, cmd_clean, re.IGNORECASE):
+            return True, pattern
+    return False, ""
 
 def init_prompt_file() -> Path:
     if not PROMPT_FILE.exists():
@@ -162,6 +191,108 @@ def check_status():
         print("Sugestao: inicie com 'systemctl --user start marvin'")
         return False
 
+def query_model_raw(prompt: str, system_prompt: str) -> str:
+    payload = {
+        "messages": [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": prompt}
+        ],
+        "stream": False,
+        "temperature": 0.2,
+    }
+    data_bytes = json.dumps(payload).encode("utf-8")
+    req = request.Request(
+        API_URL,
+        data=data_bytes,
+        headers={"Content-Type": "application/json"}
+    )
+    try:
+        with request.urlopen(req, timeout=90) as resp:
+            data = json.loads(resp.read().decode("utf-8"))
+            return data["choices"][0]["message"]["content"].strip()
+    except error.URLError as e:
+        sys.stderr.write(f"\n[Erro de conexao]: Nao foi possivel comunicar com o Marvin ({e.reason}).\n")
+        sys.stderr.write("Verifique se o servico esta ativo executando: systemctl --user status marvin\n")
+        sys.exit(1)
+    except Exception as e:
+        sys.stderr.write(f"\n[Erro inesperado]: {e}\n")
+        sys.exit(1)
+
+def handle_action_mode(user_instruction: str):
+    action_system_prompt = (
+        "Voce e o Marvin em modo de execucao operacional no Linux. "
+        "Sua tarefa e gerar EXCLUSIVAMENTE o comando de terminal Bash necessario para atender ao pedido do usuario. "
+        "Responda estritamente no seguinte formato estruturado:\n"
+        "<<<COMMAND>>>\n"
+        "<comando bash de uma ou mais linhas>\n"
+        "<<<EXPLANATION>>>\n"
+        "<explicacao concisa em uma frase em portugues>\n\n"
+        "Regras estritas:\n"
+        "- Nao use blocos markdown (```).\n"
+        "- De maneira nenhuma utilize emojis.\n"
+        "- Nao escreva preambulos nem texto fora das tags especificadas."
+    )
+
+    print("[Marvin]: Analisando pedido e gerando comando...")
+    raw_response = query_model_raw(user_instruction, action_system_prompt)
+
+    cmd_match = re.search(r"<<<COMMAND>>>(.*?)(?:<<<EXPLANATION.*?>|\Z)", raw_response, re.DOTALL | re.IGNORECASE)
+    exp_match = re.search(r"<<<EXPLANATION.*?>\s*(.*?)(?:<<<|\Z)", raw_response, re.DOTALL | re.IGNORECASE)
+
+    if cmd_match and cmd_match.group(1).strip():
+        command = cmd_match.group(1).strip()
+        explanation = exp_match.group(1).strip() if exp_match and exp_match.group(1).strip() else "Executar operacao solicitada"
+    else:
+        # Fallback limpo caso o modelo omita as tags
+        cleaned = raw_response.replace("```bash", "").replace("```sh", "").replace("```", "").strip()
+        command = cleaned
+        explanation = "Executar comando correspondente"
+
+    # Limpeza de formatacao residual
+    command = re.sub(r"<<<.*?>>>", "", command).strip("` \n\r")
+    explanation = re.sub(r"<<<.*?>>>", "", explanation).strip("` \n\r")
+
+    print("\n" + "=" * 55)
+    print(f"[Marvin propos a seguinte acao]:")
+    print(f"  Finalidade: {explanation}")
+    print(f"  Comando:    {command}")
+    print("=" * 55)
+
+    try:
+        confirm = input("\nDeseja executar este comando? [s/N]: ").strip().lower()
+    except (EOFError, KeyboardInterrupt):
+        print("\n[Acao cancelada]")
+        return
+
+    if confirm not in ("s", "sim", "y", "yes"):
+        print("[Acao cancelada pelo usuario]")
+        return
+
+    # Validacao de Seguranca (Safety Filter)
+    is_blocked, pattern = is_command_forbidden(command)
+    if is_blocked:
+        print("\n" + "!" * 55)
+        print("[Bloqueio de Seguranca]:")
+        print(f"Tentei executar o comando: {command}")
+        print("Esse comando esbarrou em uma protecao de seguranca interna do Marvin (padrao restrito detectado).")
+        print("Como o Marvin nao tem permissao para rodar essa operacao automaticamente, se voce realmente desejar executa-la, execute manualmente no seu terminal:")
+        print(f"\n  {command}\n")
+        print("!" * 55)
+        return
+
+    # Execucao do comando seguro
+    print(f"\n[Executando]: {command}")
+    print("-" * 55)
+    try:
+        ret = subprocess.run(command, shell=True)
+        print("-" * 55)
+        if ret.returncode == 0:
+            print("[Comando concluido com sucesso]")
+        else:
+            print(f"[Comando finalizado com codigo de retorno {ret.returncode}]")
+    except Exception as err:
+        print(f"[Erro na execucao]: {err}")
+
 def stream_chat(messages, system_prompt: str = None) -> str:
     full_messages = []
     if system_prompt:
@@ -217,7 +348,8 @@ def stream_chat(messages, system_prompt: str = None) -> str:
 
 def interactive_repl(session_name: str, use_memory: bool, system_prompt: str):
     print(f"Marvin Chat Interativo (Modo: {'Memoria: ' + session_name if use_memory else 'Stateless'})")
-    print("Digite 'sair', 'exit' ou Ctrl+C para encerrar.\n")
+    print("Digite 'sair', 'exit' ou Ctrl+C para encerrar.")
+    print("Dica: digite '/x <pedido>' para executar uma acao operacional.\n")
 
     history = load_session(session_name) if use_memory else []
 
@@ -237,6 +369,11 @@ def interactive_repl(session_name: str, use_memory: bool, system_prompt: str):
                 history = []
             else:
                 print("[Info]: Modo stateless nao possui historico gravado.")
+            continue
+        if prompt.startswith("/x ") or prompt.startswith("/exec "):
+            action_query = prompt.split(" ", 1)[1].strip()
+            handle_action_mode(action_query)
+            print()
             continue
 
         print("marvin> ", end="", flush=True)
@@ -258,6 +395,7 @@ def main():
     parser.add_argument("-h", "--help", action="store_true", help="Mostra esta ajuda.")
     parser.add_argument("-m", "--memory", action="store_true", help="Usa a memoria/sessao padrao.")
     parser.add_argument("-s", "--session", type=str, default=None, help="Nome da sessao de memoria a ser usada.")
+    parser.add_argument("-x", "--exec", dest="execute_action", action="store_true", help="Modo operacional: gera e executa comando apos confirmacao.")
     parser.add_argument("-c", "--clear", nargs="?", const="", default=None, help="Limpa o historico da memoria.")
     parser.add_argument("-l", "--history", nargs="?", const="", default=None, help="Exibe o historico da memoria.")
     parser.add_argument("--sessions", action="store_true", help="Lista todas as sessoes salvas.")
@@ -275,6 +413,7 @@ def main():
         print("  mvn o que e RAG?                  (Pergunta direta sem memoria)")
         print("  mvn -m continue a explicacao      (Pergunta usando memoria padrao)")
         print("  mvn -s projeto 'como fazer X?'    (Pergunta usando a sessao 'projeto')")
+        print("  mvn -x verifique o uso de memoria (Gera e executa comando com confirmacao)")
         print("  mvn -c                            (Limpa memoria padrao)")
         print("  mvn -c projeto                    (Limpa memoria da sessao 'projeto')")
         print("  mvn -l                            (Exibe historico da sessao padrao)")
@@ -315,6 +454,42 @@ def main():
     # Resolver system prompt
     active_system_prompt = args.system if args.system is not None else get_system_prompt()
 
+    # Juntar os argumentos da pergunta
+    user_query = " ".join(args.query).strip()
+
+    # Verificar se ha entrada via pipe (apenas se nao for modo acao com pergunta ja informada)
+    pipe_input = ""
+    if not (args.execute_action and user_query) and not sys.stdin.isatty():
+        try:
+            pipe_input = sys.stdin.read().strip()
+        except Exception:
+            pipe_input = ""
+
+    if pipe_input:
+        if user_query:
+            user_query = f"{user_query}\n\nContexto / Entrada adicional:\n{pipe_input}"
+        else:
+            user_query = pipe_input
+
+    # Modo Acao / Execucao Operacional (-x)
+    if args.execute_action:
+        if not user_query:
+            sys.stderr.write("[Erro]: Especifique a acao desejada. Exemplo: mvn -x verifique o uso de memoria\n")
+            sys.exit(1)
+        handle_action_mode(user_query)
+        return
+
+    # Se nao ha pergunta e stdin e um terminal, inicia REPL interativo
+    if not user_query:
+        if sys.stdin.isatty():
+            use_memory = bool(args.session or args.memory)
+            session_name = args.session or "default"
+            interactive_repl(session_name, use_memory, active_system_prompt)
+            return
+        else:
+            sys.stderr.write("[Erro]: Nenhuma pergunta fornecida via argumento ou pipe.\n")
+            sys.exit(1)
+
     # Determinar se usa memoria e qual sessao
     use_memory = False
     session_name = "default"
@@ -325,32 +500,6 @@ def main():
     elif args.memory:
         use_memory = True
         session_name = "default"
-
-    # Verificar se ha entrada via pipe
-    pipe_input = ""
-    if not sys.stdin.isatty():
-        try:
-            pipe_input = sys.stdin.read().strip()
-        except Exception:
-            pipe_input = ""
-
-    # Juntar os argumentos da pergunta
-    user_query = " ".join(args.query).strip()
-
-    if pipe_input:
-        if user_query:
-            user_query = f"{user_query}\n\nContexto / Entrada adicional:\n{pipe_input}"
-        else:
-            user_query = pipe_input
-
-    # Se nao ha pergunta e stdin e um terminal, inicia REPL interativo
-    if not user_query:
-        if sys.stdin.isatty():
-            interactive_repl(session_name, use_memory, active_system_prompt)
-            return
-        else:
-            sys.stderr.write("[Erro]: Nenhuma pergunta fornecida via argumento ou pipe.\n")
-            sys.exit(1)
 
     # Modo pergunta direta (stateless ou com memoria)
     if use_memory:

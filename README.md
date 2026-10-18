@@ -74,7 +74,21 @@ mvn                 # Chat interativo stateless (contexto mantido apenas durante
 mvn -m              # Chat interativo persistindo na memoria padrao
 mvn -s projeto      # Chat interativo persistindo na sessao 'projeto'
 ```
-Para sair do chat interativo, digite `sair`, `exit` ou pressione `Ctrl+C`.
+Para sair do chat interativo, digite `sair`, `exit` ou pressione `Ctrl+C`. No modo interativo, voce tambem pode usar `/x <pedido>` para disparar acoes operacionais.
+
+### Modo Operacional: Execucao de Comandos com Seguranca (`-x`)
+Permite solicitar acoes no sistema operacional em linguagem natural. O Marvin traduz a instrucao para o comando Bash exato e exige sua confirmacao previa antes de qualquer execucao:
+
+```bash
+mvn -x verifique o uso de memoria ram
+mvn -x crie a pasta /tmp/projeto e entre nela
+```
+
+Mecanismo de Protecao:
+1. O Marvin exibe a finalidade e o comando exato no terminal.
+2. O script pausa obrigatoriamente e solicita sua confirmacao (`[s/N]`).
+3. Se confirmado, o comando e validado contra o **Filtro de Seguranca (Safety Filter)**, que bloqueia acoes de alto risco (como `rm -rf /`, `mkfs`, `dd`, `reboot`, modificacoes destrutivas de permissoes, etc.).
+4. Se o comando for bloqueado pela politica de seguranca, o Marvin explica o motivo e exibe a sintaxe para que voce execute manualmente se desejar.
 
 ### Personalidade e Regras de Comportamento
 O Marvin carrega suas instrucoes mestras diretamente do arquivo:
