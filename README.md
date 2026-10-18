@@ -3,7 +3,7 @@
 Marvin e um assistente pessoal local executado diretamente no terminal via comando `mvn`. Ele opera sobre o modelo `Qwen3.5-2B-Q8_0.llamafile`, rodando em segundo plano como um servico de usuario do systemd, sem interface grafica, sem navegadores e com desempenho maximo sem limitacoes artificiais de CPU ou memoria.
 
 ---
-<img width="610" height="666" alt="bash" src="https://github.com/user-attachments/assets/b955ea2f-3ae0-476b-a1a5-73543a997e9d" />
+<img width="852" height="683" alt="bash" src="https://github.com/user-attachments/assets/a9938209-b4fe-4678-a524-d28f5a4a8541" />
 
 ## 1. Arquitetura
 
@@ -18,8 +18,8 @@ O sistema e composto por tres componentes principais:
 
 2. **Cliente CLI (`mvn`)**:
    - Localizado em `~/.local/bin/mvn` (link simbolico para `~/marvin/mvn`).
-   - Implementado em Python 3 usando apenas a biblioteca padrao do sistema.
-   - Comunica-se com a API local (`/v1/chat/completions`) utilizando Server-Sent Events (SSE) para exibir respostas em streaming instantaneo no terminal.
+   - Implementado em Python 3 e usa Rich para formatar Markdown e paineis no terminal.
+   - Comunica-se com a API local (`/v1/chat/completions`) utilizando Server-Sent Events (SSE) e exibe a resposta formatada quando ela fica pronta.
    - Suporta modo stateless, modo com memoria, sessoes nomeadas, pipes Unix e chat interativo.
 
 3. **Armazenamento de Memoria**:
@@ -38,7 +38,15 @@ O sistema e composto por tres componentes principais:
 
 ## Testes Automatizados
 
-Execute a suíte com a biblioteca `unittest` do Python:
+Instale a dependencia do cliente:
+
+```bash
+python3 -m pip install -r requirements.txt
+```
+
+O Rich renderiza respostas Markdown, titulos, listas e blocos de codigo. As cores sao detectadas pelo terminal e podem ser desativadas com `NO_COLOR=1`. Quando a saida e redirecionada, o Rich remove os codigos de cor.
+
+Execute a suite com a biblioteca `unittest` do Python:
 
 ```bash
 python3 -m unittest discover -s tests -v
@@ -142,7 +150,10 @@ Como Funciona o Ciclo de Execucao:
 1. **Inspecao e Acao**: O Marvin analisa o pedido e propoe o comando Bash exato, descrevendo a finalidade.
 2. **Confirmacao Humana**: O terminal pausa e solicita sua autorizacao previa (`[s/N]`).
 3. **Filtro de Seguranca**: Se confirmado, o comando e inspecionado contra o Safety Filter (bloqueia comandos destrutivos como `rm -rf /`, `mkfs`, `dd`, `reboot`, etc.).
-4. **Execucao e Feedback**: O script executa o comando aprovado, exibe a saida no terminal e entrega o retorno bruto para o Marvin como contexto.
+4. **Execucao e Feedback**: O script executa o comando aprovado, mostra um resumo da saida no terminal e entrega o retorno para o Marvin como contexto. Use `--verbose` para exibir a saida completa:
+   ```bash
+   mvn -x --verbose investigue os logs do servico
+   ```
 5. **Decisao Multi-Passo**: Com base na saida real do sistema, o Marvin decide autonomamente:
    - Se precisa de outro comando para aprofundar ou corrigir a busca (ate o limite seguro de 4 turnos);
    - Ou se ja tem dados suficientes para entregar o **Relatorio Final** detalhado em linguagem natural.
