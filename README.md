@@ -1,6 +1,27 @@
 # Marvin: Assistente Pessoal Local CLI
 
-Marvin e um assistente pessoal local executado diretamente no terminal via comando `mvn`. Ele opera sobre o modelo `Qwen3.5-2B-Q8_0.llamafile`, rodando em segundo plano como um servico de usuario do systemd, sem interface grafica, sem navegadores e com desempenho maximo sem limitacoes artificiais de CPU ou memoria.
+Marvin e um assistente pessoal local executado diretamente no terminal via comando `mvn`. Ele opera sobre um modelo llamafile escolhido pelo usuario, rodando em segundo plano como um servico de usuario do systemd, sem interface grafica, sem navegadores e com desempenho maximo sem limitacoes artificiais de CPU ou memoria.
+
+## Instalacao rapida
+
+Em Linux com systemd, baixe e execute o instalador:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/fellypedarosa/marvin/main/scripts/marvin.sh -o marvin.sh
+sh marvin.sh
+```
+
+O instalador clona o repositorio em `~/marvin`, prepara `system_prompt.md`, cria `.env` com um `SEARXNG_SECRET` aleatorio, configura o ambiente Python, instala o atalho `~/.local/bin/mvn`, inicia o SearXNG e instala/inicia o servico de usuario. Ele preserva `.env` e `system_prompt.md` se ja existirem. Se faltar algum pacote no Arch Linux ou derivados, pergunta antes de instalar com `sudo`; em outras distribuicoes, dependencias ausentes devem ser instaladas conforme a documentacao da distribuicao e do [Docker Engine](https://docs.docker.com/engine/install/).
+
+Quando nao houver um modelo `.llamafile` na raiz do projeto, o instalador pergunta se deseja baixar o Qwen3.5-2B-Q8_0. Tambem e possivel responder nao, salvar um unico arquivo `.llamafile` em `~/marvin` e pressionar Enter para o instalador procurar novamente. Modelos alternativos estao listados na [documentacao do llamafile](https://docs.mozilla.ai/llamafile/getting-started/pre-built-llamafiles). O servico exige exatamente um arquivo `.llamafile` na raiz.
+
+Para trocar o modelo depois, mantenha somente o modelo desejado na raiz de `~/marvin` e execute:
+
+```bash
+~/marvin/scripts/trocar-model.sh
+```
+
+Esse script valida a selecao e reinicia `marvin.service`. O `scripts/run-model.sh` e chamado pelo systemd e inicia o unico modelo encontrado; nao e o comando de troca.
 
 ---
 <img width="852" height="683" alt="bash" src="https://github.com/user-attachments/assets/a9938209-b4fe-4678-a524-d28f5a4a8541" />
@@ -11,13 +32,13 @@ O sistema e composto por tres componentes principais:
 
 1. **Backend Daemon (`marvin.service`)**:
    - Gerenciado via `systemd --user`.
-   - Executa `~/marvin/Qwen3.5-2B-Q8_0.llamafile` em modo `--server`.
+   - Executa o unico arquivo `*.llamafile` encontrado na raiz de `~/marvin` em modo `--server`.
    - Escuta exclusivamente em `127.0.0.1:8088`.
    - Utiliza buffer de contexto de 8192 tokens e dynamic batching (`--cont-batching`).
    - Inicia automaticamente no boot do sistema operacional via `loginctl enable-linger`.
 
 2. **Cliente CLI (`mvn`)**:
-   - Localizado em `~/.local/bin/mvn` (link simbolico para `~/marvin/mvn`).
+   - Atalho executavel em `~/.local/bin/mvn`, que chama o cliente Python do projeto usando o ambiente virtual local.
    - Implementado em Python 3 e usa Rich para formatar Markdown e paineis no terminal.
    - Comunica-se com a API local (`/v1/chat/completions`) utilizando Server-Sent Events (SSE) e exibe a resposta formatada quando ela fica pronta.
    - Suporta modo stateless, modo com memoria, sessoes nomeadas, pipes Unix e chat interativo.
@@ -63,8 +84,9 @@ dedicado como o Gitleaks e habilite a proteção de envio do GitHub.
 
 ### Configuracao local do SearXNG
 
-O Compose carrega automaticamente as variaveis do arquivo `.env`. Em um clone
-novo, crie-o a partir do modelo e ajuste o valor para sua instalacao:
+O Compose carrega automaticamente as variaveis do arquivo `.env`. O instalador
+cria esse arquivo com uma chave aleatoria. Em uma configuracao manual, crie-o a
+partir do modelo e ajuste o valor para sua instalacao:
 
 ```bash
 cp .env.example .env

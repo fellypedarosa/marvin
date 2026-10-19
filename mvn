@@ -552,6 +552,7 @@ def handle_action_mode(user_instruction: str, verbose: bool = False):
     block = 1
     executed_any = False
     while True:
+        start_guided_cycle = False
         for turn in range(1, MAX_ACTION_TURNS + 1):
             raw_response = query_messages_raw(messages)
 
@@ -637,8 +638,32 @@ def handle_action_mode(user_instruction: str, verbose: bool = False):
                 return
 
             if confirm not in ("s", "sim", "y", "yes"):
-                terminal_console().print(Text("Operação interrompida pelo usuário.", style="yellow"))
-                return
+                terminal_console().print(Text("Comando recusado; ele não será executado.", style="yellow"))
+                terminal_console().print(Text("Diga por que recusou e qual abordagem prefere.", style="dim"))
+                while True:
+                    try:
+                        guidance = input("Sua orientação para continuar: ").strip()
+                    except (EOFError, KeyboardInterrupt):
+                        terminal_console().print(Text("Operação cancelada.", style="yellow"))
+                        return
+                    if guidance:
+                        break
+                    terminal_console().print(Text("Informe uma orientação para continuar.", style="yellow"))
+
+                messages.append({"role": "assistant", "content": raw_response})
+                messages.append({
+                    "role": "user",
+                    "content": (
+                        "A proposta de comando anterior foi recusada e NÃO foi executada. "
+                        f"Orientação do usuário: {guidance}\n"
+                        "Não repita o comando recusado. Continue a solicitação original e proponha uma alternativa "
+                        "que respeite essa orientação usando o formato <<<ACTION>>>."
+                    ),
+                })
+                if turn == MAX_ACTION_TURNS:
+                    start_guided_cycle = True
+                    break
+                continue
 
             # Validacao de Seguranca (Safety Filter)
             is_blocked, pattern = is_command_forbidden(command)
@@ -698,6 +723,10 @@ def handle_action_mode(user_instruction: str, verbose: bool = False):
             )
             messages.append({"role": "user", "content": prompt_next})
             terminal_console().print(Text("Analisando o resultado...", style="dim"))
+
+        if start_guided_cycle:
+            block += 1
+            continue
 
         # No fim do bloco, deixe o modelo concluir ou indique que precisa de orientacao.
         decision = query_messages_raw(messages)

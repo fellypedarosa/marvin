@@ -133,6 +133,64 @@ class MarvinCLITests(unittest.TestCase):
         self.assertIn("seguro", output.getvalue())
         self.assertIn("Comando concluído.", output.getvalue())
 
+    def test_action_mode_rejection_accepts_guidance_and_proposes_an_alternative(self):
+        replies = [
+            "<<<ACTION>>>\nComando: sudo mkdir -p /tmp/mvn\nFinalidade: criar o diretorio solicitado",
+            "<<<ACTION>>>\nComando: mkdir -p /tmp/mvn\nFinalidade: criar o diretorio sem privilegios administrativos",
+            "<<<FINAL_ANSWER>>>\nO diretorio foi criado sem usar sudo.",
+            "<<<TASK_COMPLETE>>>",
+        ]
+        query = mock.Mock(side_effect=replies)
+        completed = subprocess.CompletedProcess("mkdir", 0, stdout="", stderr="")
+        output = io.StringIO()
+        answers = iter(["n", "Não use sudo; prefiro uma alternativa sem privilégios.", "s"])
+
+        def answer_confirmation(prompt):
+            return next(answers)
+
+        with mock.patch.object(marvin, "MAX_ACTION_TURNS", 2):
+            with mock.patch.object(marvin, "get_system_prompt", return_value="Prompt de teste"):
+                with mock.patch.object(sys, "argv", ["mvn", "-x", "crie /tmp/mvn"]):
+                    with mock.patch.object(sys, "stdin", io.StringIO("")):
+                        with mock.patch.object(marvin, "query_messages_raw", query):
+                            with mock.patch("builtins.input", side_effect=answer_confirmation):
+                                with mock.patch.object(marvin.subprocess, "run", return_value=completed) as run_command:
+                                    with contextlib.redirect_stdout(output):
+                                        marvin.main()
+
+        run_command.assert_called_once()
+        self.assertEqual(run_command.call_args.args[0], "mkdir -p /tmp/mvn")
+        self.assertIn("Comando recusado", output.getvalue())
+        self.assertIn("O diretorio foi criado sem usar sudo.", output.getvalue())
+        resumed_messages = query.call_args_list[1].args[0]
+        refusal_context = "\n".join(message["content"] for message in resumed_messages)
+        self.assertIn("foi recusada e NÃO foi executada", refusal_context)
+        self.assertIn("sem privilégios", refusal_context)
+
+    def test_action_mode_ctrl_c_during_rejection_guidance_cancels_without_execution(self):
+        query = mock.Mock(return_value=(
+            "<<<ACTION>>>\nComando: sudo mkdir -p /tmp/mvn\nFinalidade: criar o diretorio solicitado"
+        ))
+        output = io.StringIO()
+
+        def interrupt_at_guidance(prompt):
+            if prompt.startswith("Sua orientação para continuar"):
+                raise KeyboardInterrupt
+            return "n"
+
+        with mock.patch.object(marvin, "get_system_prompt", return_value="Prompt de teste"):
+            with mock.patch.object(sys, "argv", ["mvn", "-x", "crie /tmp/mvn"]):
+                with mock.patch.object(sys, "stdin", io.StringIO("")):
+                    with mock.patch.object(marvin, "query_messages_raw", query):
+                        with mock.patch("builtins.input", side_effect=interrupt_at_guidance):
+                            with mock.patch.object(marvin.subprocess, "run") as run_command:
+                                with contextlib.redirect_stdout(output):
+                                    marvin.main()
+
+        run_command.assert_not_called()
+        query.assert_called_once()
+        self.assertIn("Operação cancelada.", output.getvalue())
+
     def test_action_mode_waits_for_guidance_and_continues_in_same_run(self):
         replies = [
             "<<<ACTION>>>\nComando: printf tentativa1\nFinalidade: testar a primeira tentativa",
