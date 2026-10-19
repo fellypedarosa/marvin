@@ -202,6 +202,83 @@ class MarvinCLITests(unittest.TestCase):
         self.assertIn("seguro", output.getvalue())
         self.assertIn("Comando concluído.", output.getvalue())
 
+    def test_simple_named_directory_request_builds_exact_idempotent_mkdir(self):
+        action = marvin._simple_directory_creation_action("crie uma pasta chamada senna em /tmp")
+
+        self.assertIn("<<<ACTION>>>", action)
+        self.assertIn("Comando: mkdir -p -- /tmp/senna", action)
+        self.assertEqual(
+            marvin._simple_directory_creation_action("crie uma pasta em /tmp"),
+            "",
+            "não deve inventar o nome que falta",
+        )
+        self.assertEqual(
+            marvin._simple_directory_creation_action("pesquise o presidente atual e crie uma pasta com o nome dele em /tmp"),
+            "",
+            "a etapa dependente de pesquisa não pode ser convertida em um mkdir antecipado",
+        )
+
+    def test_action_mode_creates_named_directory_without_search_and_waits_for_confirmation(self):
+        model_replies = iter([
+            "<<<FINAL_ANSWER>>>A pasta /tmp/senna foi criada.",
+            "<<<TASK_COMPLETE>>>",
+        ])
+        query = mock.Mock(side_effect=lambda _messages: next(model_replies))
+        completed = subprocess.CompletedProcess("mkdir", 0, stdout="", stderr="")
+        output = io.StringIO()
+        events = []
+
+        with mock.patch.object(marvin, "get_system_prompt", return_value="Prompt de teste"):
+            with mock.patch.object(sys, "argv", ["mvn", "-x", "crie uma pasta chamada senna em /tmp"]):
+                with mock.patch.object(sys, "stdin", io.StringIO("")):
+                    with mock.patch.object(marvin, "query_messages_raw", query):
+                        with mock.patch.object(marvin, "search_web") as search:
+                            with mock.patch("builtins.input", return_value="s") as confirmation:
+                                with mock.patch.object(
+                                    marvin.subprocess,
+                                    "run",
+                                    side_effect=lambda *args, **kwargs: (events.append("command"), completed)[1],
+                                ) as run_command:
+                                    with contextlib.redirect_stdout(output):
+                                        marvin.main()
+
+        search.assert_not_called()
+        confirmation.assert_called_once()
+        run_command.assert_called_once()
+        self.assertEqual(run_command.call_args.args[0], "mkdir -p -- /tmp/senna")
+        self.assertEqual(events, ["command"])
+        self.assertEqual(query.call_count, 2, "o modelo só deve auditar depois da execução")
+        self.assertIn("Comando proposto", output.getvalue())
+        self.assertIn("Relatório final", output.getvalue())
+
+    def test_action_mode_rejects_unsolicited_search_and_repairs_plain_response(self):
+        model_replies = iter([
+            marvin.WEB_SEARCH_MARKER + json.dumps({"query": "como criar arquivo em /tmp"}),
+            "Sugiro primeiro verificar o diretório com ls.",
+            "<<<ACTION>>>\nComando: touch /tmp/marvin-action-test\nFinalidade: criar o arquivo solicitado",
+            "<<<FINAL_ANSWER>>>O arquivo foi criado.",
+            "<<<TASK_COMPLETE>>>",
+        ])
+        query = mock.Mock(side_effect=lambda _messages: next(model_replies))
+        completed = subprocess.CompletedProcess("touch", 0, stdout="", stderr="")
+        output = io.StringIO()
+
+        with mock.patch.object(marvin, "get_system_prompt", return_value="Prompt de teste"):
+            with mock.patch.object(sys, "argv", ["mvn", "-x", "crie um arquivo chamado marvin-action-test em /tmp"]):
+                with mock.patch.object(sys, "stdin", io.StringIO("")):
+                    with mock.patch.object(marvin, "query_messages_raw", query):
+                        with mock.patch.object(marvin, "search_web") as search:
+                            with mock.patch("builtins.input", return_value="s"):
+                                with mock.patch.object(marvin.subprocess, "run", return_value=completed) as run_command:
+                                    with contextlib.redirect_stdout(output):
+                                        marvin.main()
+
+        search.assert_not_called()
+        self.assertEqual(run_command.call_count, 1)
+        self.assertEqual(run_command.call_args.args[0], "touch /tmp/marvin-action-test")
+        self.assertIn("Não responda com uma explicação", query.call_args_list[2].args[0][-1]["content"])
+        self.assertIn("Comando proposto", output.getvalue())
+
     def test_action_mode_researches_before_proposing_dependent_command(self):
         plan = marvin.TASK_PLAN_MARKER + json.dumps({"steps": [
             {"id": "s1", "kind": "research", "goal": "Pesquisar o nome do presidente atual de Cuba", "depends_on": []},
@@ -702,7 +779,7 @@ class MarvinCLITests(unittest.TestCase):
             ]
         )
 
-    def test_action_mode_search_tool_prompt_is_available_without_forcing_search(self):
+    def test_action_mode_disables_search_for_local_task_without_forcing_it(self):
         replies = [
             "<<<ACTION>>>\nComando: printf teste\nFinalidade: verificar sem pesquisa",
             "<<<FINAL_ANSWER>>>\nConcluído.",
@@ -722,7 +799,9 @@ class MarvinCLITests(unittest.TestCase):
                                         marvin.main()
 
         search.assert_not_called()
-        self.assertIn("Ferramenta de pesquisa na web", query.call_args_list[0].args[0][0]["content"])
+        system_content = query.call_args_list[0].args[0][0]["content"]
+        self.assertNotIn("Ferramenta de pesquisa na web", system_content)
+        self.assertIn("pesquisa web não é necessária", system_content)
 
     def test_action_mode_no_web_search_disables_research_tool(self):
         search_request = marvin.WEB_SEARCH_MARKER + json.dumps({"query": "informação atual"})

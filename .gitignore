@@ -5,6 +5,7 @@ gaveta/
 
 # Personalidade pessoal
 system_prompt.md
+suggestions.md
 
 # Variaveis locais; mantenha apenas o modelo versionado
 .env

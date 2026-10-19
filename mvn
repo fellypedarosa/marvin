@@ -415,6 +415,40 @@ def _requires_planned_command(text: str) -> bool:
     ))
 
 
+def _simple_directory_creation_action(text: str) -> str:
+    """Build an exact mkdir action for a clear, single-step named-directory request."""
+    if _requires_action_web_search(text) or _needs_task_decomposition(text):
+        return ""
+    if not re.search(
+        r"\b(?:crie|criar|cria|fa[cç]a|fazer)\b.{0,60}\b(?:pasta|diret[oó]rio)\b",
+        text,
+        re.IGNORECASE,
+    ):
+        return ""
+
+    name_match = re.search(
+        r"\b(?:pasta|diret[oó]rio)\b.{0,50}?\b(?:chamad[ao]|nomead[ao]|com (?:o )?nome)\s+"
+        r"(?:['\"`]([^'\"`]+)['\"`]|(.+?))(?=\s+(?:em|dentro de)\s+/|[,;.!?]|$)",
+        text,
+        re.IGNORECASE,
+    )
+    path_match = re.search(r"\b(?:em|dentro de)\s+(/[^\s,;]+)", text, re.IGNORECASE)
+    if not name_match or not path_match:
+        return ""
+    name = (name_match.group(1) or name_match.group(2) or "").strip().strip("'\"`.,;:!? ")
+    parent = path_match.group(1).rstrip(".,!?/") or "/"
+    if not name or name in {".", ".."} or "/" in name or "\x00" in name:
+        return ""
+
+    target = os.path.join(parent, name)
+    command = "mkdir -p -- " + shlex.quote(target)
+    return (
+        "<<<ACTION>>>\n"
+        f"Comando: {command}\n"
+        "Finalidade: criar a pasta com o nome e no diretório pedidos pelo usuário"
+    )
+
+
 def _validate_task_plan(plan_data: dict) -> tuple[list[dict] | None, str]:
     """Validate a small dependency graph returned by the task planner."""
     if not isinstance(plan_data, dict) or not isinstance(plan_data.get("steps"), list):
@@ -1584,13 +1618,27 @@ def handle_action_mode(
             for step in task_steps:
                 if step["kind"] == "command" and not step["depends_on"]:
                     step["depends_on"] = sorted(research_ids)
+    def research_is_allowed() -> bool:
+        planned_research = bool(task_steps and any(step["kind"] == "research" for step in task_steps))
+        return allow_web_search and (action_plan["research_required"] or planned_research)
+
+    initial_research_allowed = research_is_allowed()
+    direct_directory_action = _simple_directory_creation_action(user_instruction)
+    direct_directory_action_pending = bool(direct_directory_action)
+    command_required = _requires_planned_command(user_instruction)
     action_system_prompt = (
         get_system_prompt()
-        + ("\n\n" + WEB_SEARCH_SYSTEM_PROMPT if allow_web_search else "\n\nPesquisa web desativada pelo usuário nesta solicitação.")
+        + (
+            "\n\n" + WEB_SEARCH_SYSTEM_PROMPT
+            if initial_research_allowed
+            else "\n\nPesquisa web desativada pelo usuário nesta solicitação."
+            if not allow_web_search
+            else "\n\nA pesquisa web não é necessária para esta tarefa local. Não solicite buscas; proponha a ação local diretamente."
+        )
         + "\n\nProtocolo de saida do modo operacional -x:\n"
         + "- Para propor um comando, responda no formato <<<ACTION>>> seguido de 'Comando: ...' e 'Finalidade: ...'.\n"
         + "- Responda com <<<FINAL_ANSWER>>> somente para apresentar a conclusao final.\n"
-        + ("- Se precisar de informações atuais da internet, use a ferramenta de pesquisa com <<<WEB_SEARCH>>> e aguarde os resultados; não tente pesquisar com curl, wget ou comandos de shell.\n" if allow_web_search else "- Não pesquise na internet nem use comandos de rede nesta solicitação.\n")
+        + ("- Se precisar de informações atuais da internet, use a ferramenta de pesquisa com <<<WEB_SEARCH>>> e aguarde os resultados; não tente pesquisar com curl, wget ou comandos de shell.\n" if initial_research_allowed else "- Não pesquise na internet nem use comandos de rede nesta solicitação.\n")
         + "- Use os resultados como evidência para decidir o próximo passo; não invente fatos, nomes ou resultados. Cite as fontes na resposta final.\n"
         + "- Quando uma ação depender de uma informação pesquisada, só proponha a ação depois de receber os resultados.\n"
         + ("- Siga o plano estruturado abaixo. Cada proposta <<<ACTION>>> deve incluir 'Etapa: id'. Só escolha etapas prontas, cujas dependências estejam concluídas. A pesquisa deve corresponder a uma etapa research pronta e incluir 'step_id' no JSON de <<<WEB_SEARCH>>>; se os resultados forem inconclusivos, tente até três consultas diferentes antes de desistir.\n" if task_steps else "")
@@ -1614,23 +1662,67 @@ def handle_action_mode(
             title="Marvin · Plano da tarefa",
         )
 
-    def query_action(current_messages: list) -> str | None:
+    def query_action(current_messages: list, require_action: bool = True) -> str | None:
+        nonlocal direct_directory_action_pending
+        if direct_directory_action_pending:
+            direct_directory_action_pending = False
+            return direct_directory_action
+
         response = query_action_model(
             current_messages,
             search_options,
-            allow_web_search,
+            research_is_allowed(),
             action_plan,
             task_steps,
         )
         if response.startswith(ACTION_PLAN_BLOCKED):
             print_markdown(response[len(ACTION_PLAN_BLOCKED):].strip(), title="Marvin · Plano pendente")
             return None
+        has_action = "<<<ACTION>>>" in response and bool(_extract_proposed_action_command(response))
+        has_final_answer = any(
+            marker in response
+            for marker in ("<<<FINAL_ANSWER>>>", "<<<TASK_INCOMPLETE>>>", "<<<TASK_COMPLETE>>>")
+        )
+        if require_action and command_required and not has_action and not has_final_answer:
+            current_messages.extend([
+                {"role": "assistant", "content": response},
+                {"role": "user", "content": (
+                    "A solicitação exige uma ação no sistema. Não responda com uma explicação ou uma sugestão em texto. "
+                    "Proponha agora uma única ação no formato <<<ACTION>>> com os campos Comando e Finalidade. "
+                    + ("Não pesquise na web para esta tarefa local. " if not research_is_allowed() else "Use somente evidências das pesquisas já realizadas. ")
+                    + "Não use sudo sem necessidade e não diga que a ação foi concluída antes de executá-la."
+                )},
+            ])
+            response = query_action_model(
+                current_messages,
+                search_options,
+                research_is_allowed(),
+                action_plan,
+                task_steps,
+            )
+            if response.startswith(ACTION_PLAN_BLOCKED):
+                print_markdown(response[len(ACTION_PLAN_BLOCKED):].strip(), title="Marvin · Plano pendente")
+                return None
+            has_action = "<<<ACTION>>>" in response and bool(_extract_proposed_action_command(response))
+            has_final_answer = any(
+                marker in response
+                for marker in ("<<<FINAL_ANSWER>>>", "<<<TASK_INCOMPLETE>>>", "<<<TASK_COMPLETE>>>")
+            )
+            if not has_action and not has_final_answer:
+                print_markdown(
+                    "Não consegui obter uma proposta de comando válida. Nenhum comando foi executado.",
+                    title="Marvin · Plano pendente",
+                )
+                return None
         return response
 
     def update_plan_from_guidance(guidance: str) -> bool:
         if not action_plan["research_required"] and _requires_action_web_search(guidance):
             updated_plan = _build_action_plan(user_instruction + "\n" + guidance)
             action_plan.update(updated_plan)
+            if action_plan["research_required"] and allow_web_search:
+                messages[0]["content"] += "\n\n" + WEB_SEARCH_SYSTEM_PROMPT
+                messages[0]["content"] += "\n\nA orientação do usuário agora exige pesquisa. Use <<<WEB_SEARCH>>> antes de qualquer ação dependente."
             messages[0]["content"] += "\n\nPlano atualizado pela orientação do usuário:\n" + _action_plan_prompt(action_plan)
 
         if task_steps:
@@ -1887,7 +1979,7 @@ def handle_action_mode(
                 "Nao proponha comandos nesta resposta; explique que precisa da orientacao do usuario."
             ),
         })
-        help_report = query_action(messages)
+        help_report = query_action(messages, require_action=False)
         if help_report is None:
             return
         help_report = help_report.replace("<<<FINAL_ANSWER>>>", "").replace("<<<ACTION>>>", "").strip()
