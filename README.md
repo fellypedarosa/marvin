@@ -162,11 +162,7 @@ O Marvin usa o [SearXNG](https://github.com/searxng/searxng), um metabuscador de
 docker compose up -d
 ```
 
-O endpoint JSON fica habilitado na configuracao versionada em `searxng/settings.yml`, e o servico escuta somente no loopback (`127.0.0.1:8888`). Para conferir se respondeu:
-
-```bash
-curl -fsS 'http://127.0.0.1:8888/search?q=teste&format=json' | head
-```
+O endpoint JSON fica habilitado na configuracao versionada em `searxng/settings.yml`, e o servico escuta somente no loopback (`127.0.0.1:8888`).
 
 Exemplo:
 ```bash
@@ -204,17 +200,20 @@ mvn -x crie a pasta /tmp/projeto e clone o repositorio https://...
 ```
 
 Como Funciona o Ciclo de Execucao:
-1. **Inspecao e Acao**: O Marvin analisa o pedido e propoe o comando Bash exato, descrevendo a finalidade.
-2. **Confirmacao Humana**: O terminal pausa e solicita sua autorizacao previa (`[s/N]`).
-3. **Filtro de Seguranca**: Se confirmado, o comando e inspecionado contra o Safety Filter (bloqueia comandos destrutivos como `rm -rf /`, `mkfs`, `dd`, `reboot`, etc.).
-4. **Execucao e Feedback**: O script executa o comando aprovado, mostra um resumo da saida no terminal e entrega o retorno para o Marvin como contexto. Use `--verbose` para exibir a saida completa:
+1. **Plano e Pesquisa na Web**: Antes de agir, o Marvin organiza as etapas da tarefa. Se o pedido exigir explicitamente uma pesquisa ou envolver um fato atual, a pesquisa pelo SearXNG local vira uma dependência obrigatória: comandos e conclusões ficam bloqueados até haver resultados relacionados. A pesquisa nao executa comandos; o comando proposto continua aguardando sua confirmacao. Use `--no-web-search` para desativar a pesquisa nessa solicitacao.
+2. **Inspecao e Acao**: O Marvin analisa o pedido e propoe o comando Bash exato, descrevendo a finalidade.
+3. **Confirmacao Humana**: O terminal pausa e solicita sua autorizacao previa (`[s/N]`).
+4. **Filtro de Seguranca**: Se confirmado, o comando e inspecionado contra o Safety Filter (bloqueia comandos destrutivos como `rm -rf /`, `mkfs`, `dd`, `reboot`, etc.).
+5. **Execucao e Feedback**: O script executa o comando aprovado, mostra um resumo da saida no terminal e entrega o retorno para o Marvin como contexto. Use `--verbose` para exibir a saida completa:
    ```bash
    mvn -x --verbose investigue os logs do servico
    ```
-5. **Decisao Multi-Passo**: Com base na saida real do sistema, o Marvin decide autonomamente:
+6. **Decisao Multi-Passo**: Com base nos resultados da pesquisa e na saida real do sistema, o Marvin decide autonomamente:
    - Se precisa de outro comando para aprofundar ou corrigir a busca (ate 4 comandos por ciclo);
    - Ou se ja concluiu o pedido e pode entregar o **Relatorio Final**. Uma falha explicada ou um proximo passo sugerido nao conta como tarefa concluida; o Marvin verifica essa condicao antes de encerrar.
-6. **Pedido de Orientacao**: Se ainda precisar agir depois de 4 comandos, o Marvin resume o que tentou e aguarda sua orientacao no mesmo processo. Sua resposta inicia outro ciclo de ate 4 comandos; digite `encerrar` para parar. Cada comando continua exigindo confirmacao.
+7. **Pedido de Orientacao**: Se ainda precisar agir depois de 4 comandos, o Marvin resume o que tentou e aguarda sua orientacao no mesmo processo. Sua resposta inicia outro ciclo de ate 4 comandos; digite `encerrar` para parar. Cada comando continua exigindo confirmacao.
+
+Pedidos com varias ações conectadas são decompostos em etapas estruturadas com dependências. O controlador só libera uma etapa quando seus pré-requisitos foram concluídos; uma etapa que falha permanece aberta para nova tentativa, e as etapas seguintes aguardam. As etapas aparecem no terminal, e propostas de comando precisam indicar qual etapa atendem. Isso organiza a execução sem exibir cadeia de pensamento.
 
 ### Personalidade e Regras de Comportamento
 O Marvin carrega suas instrucoes mestras diretamente do arquivo:
