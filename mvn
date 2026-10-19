@@ -9,6 +9,7 @@ import subprocess
 import socket
 import ipaddress
 import concurrent.futures
+import unicodedata
 from html.parser import HTMLParser
 from datetime import datetime
 from pathlib import Path
@@ -319,21 +320,61 @@ def verify_action_completion(messages: list, proposed_answer: str) -> bool:
     return "<<<TASK_COMPLETE>>>" in verdict
 
 WEB_SEARCH_MARKER = "<<<WEB_SEARCH>>>"
-FRESHNESS_QUERY = re.compile(
-    r"\b(agora|hoje|atual(?:mente)?|neste momento|cotação|cotacao|"
-    r"preço (?:atual|hoje)|preco (?:atual|hoje)|valor atual|"
-    r"notícias? (?:de hoje|recentes|mais recentes)|noticias? (?:de hoje|recentes|mais recentes)|"
-    r"últim[oa]s? (?:notícias?|versões?|releases?)|ultim[oa]s? (?:noticias?|versoes?|releases?)|"
-    r"mais recente|versão atual|versao atual|versão mais nova|versao mais nova|"
-    r"lançamento (?:atual|mais recente)|lancamento (?:atual|mais recente)|release atual)",
+WEATHER_QUERY = re.compile(
+    r"\b(?:previs[aã]o (?:do tempo|para)|vai chover|est[aá] chovendo|"
+    r"(?:est[aá]|t[aá]|faz|como est[aá]|como t[aá]).{0,35}(?:frio|calor|temperatura|tempo|chuva)|"
+    r"(?:frio|calor|temperatura|chuva|clima|tempo).{0,45}(?:hoje|amanh[ãa]|agora|atual|em [A-Za-zÀ-ÿ])|"
+    r"temperatura (?:em|no|na|para)\b)",
+    re.IGNORECASE,
+)
+CURRENT_FACT_QUERY = re.compile(
+    r"\b(?:cota[cç][aã]o|c[aâ]mbio|pre[cç]o|valor|not[ií]cia|not[ií]cias|"
+    r"vers[aã]o|release|lan[cç]amento|resultado|placar|elei[cç][aã]o)\b"
+    r".{0,70}\b(?:agora|hoje|atual(?:mente)?|recente|mais novo|mais nova|"
+    r"mais recente|deste m[eê]s|desta semana)\b|"
+    r"\b(?:agora|hoje|atual(?:mente)?|recente|mais novo|mais nova|mais recente)\b"
+    r".{0,70}\b(?:cota[cç][aã]o|c[aâ]mbio|pre[cç]o|valor|not[ií]cia|not[ií]cias|"
+    r"vers[aã]o|release|lan[cç]amento|resultado|placar|elei[cç][aã]o)\b",
+    re.IGNORECASE,
+)
+WEATHER_SOURCE_DOMAINS = (
+    "inmet.gov.br", "climatempo.com.br", "tempo.com", "weather.com",
+    "accuweather.com", "open-meteo.com", "yr.no", "meteoblue.com",
+)
+SEARCH_CANCELLATION = re.compile(
+    r"\b(?:cancelar|cancela|esquece|deixa pra l[aá]|n[aã]o era uma pergunta|"
+    r"n[aã]o quero saber|n[aã]o quero pesquisar|n[aã]o precisa pesquisar|"
+    r"n[aã]o precisa buscar|n[aã]o pesquise|n[aã]o pesquisa|"
+    r"estou s[oó] brincando|s[oó] estou brincando|quebrando o gelo|"
+    r"foi brincadeira|era brincadeira|estava brincando|s[oó] testando|"
+    r"era s[oó] uma brincadeira)\b",
+    re.IGNORECASE,
+)
+NEW_SEARCH_INTENT = re.compile(
+    r"\b(?:na verdade|em vez disso|na realidade|quis dizer|pesquise|procure|"
+    r"busque|verifique|me diga|explique|agora quero)\b|\?",
+    re.IGNORECASE,
+)
+SEARCH_UNCERTAIN_REPLY = re.compile(
+    r"^\s*(?:n[aã]o sei|sei l[aá]|tanto faz|n[aã]o lembro|n[aã]o tenho certeza)[.! ]*$",
+    re.IGNORECASE,
+)
+CASUAL_CANCELLATION = re.compile(
+    r"\b(?:quebrando o gelo|s[oó] estou brincando|estou s[oó] brincando|"
+    r"s[oó] tô brincando|tô s[oó] brincando|foi brincadeira|era brincadeira|"
+    r"estava brincando|estava s[oó] brincando|s[oó] testando|era s[oó] uma brincadeira)\b",
     re.IGNORECASE,
 )
 WEB_SEARCH_SYSTEM_PROMPT = """Ferramenta de pesquisa na web:
 - Se a pergunta exigir informacao atual, fatos que voce nao conhece com confianca ou pesquisa de fontes, solicite uma busca antes de responder.
+- Antes de pesquisar, verifique se faltam dados essenciais. Para clima e temperatura, precisa saber a cidade ou regiao; pergunte ao usuario se ela nao estiver clara. Nao invente localizacao nem apresente uma media nacional como se fosse a temperatura do usuario.
+- Se faltar um dado essencial para pesquisar, peça esclarecimento em vez de iniciar a busca. Quando o cliente pedir esse esclarecimento, interprete a resposta como uma nova decisão: respeite cancelamentos, use dados fornecidos para completar a busca e encaminhe uma mudança de pedido para uma nova análise. Nunca trate uma frase inteira automaticamente como valor de um campo.
+- Reformule a consulta como uma busca objetiva pelo dado solicitado, em vez de copiar uma pergunta conversacional. Para clima, inclua temperatura/previsao, local e periodo.
 - Para solicitar uma busca, sua resposta inteira deve comecar exatamente com <<<WEB_SEARCH>>> e, na linha seguinte, conter um objeto JSON como {\"query\": \"consulta curta para a web\", \"categories\": \"it\", \"time_range\": \"month\", \"engines\": [\"google\", \"bing\"]}. Nao inclua texto adicional antes do marcador.
 - Use uma consulta objetiva e em portugues quando fizer sentido. Escolha categorias, período e mecanismos apenas quando forem úteis; sem escolha, use os mecanismos padrão do SearXNG.
 - Para documentação e programação, prefira a categoria it. Para acontecimentos, prefira news. Para fatos gerais, use general.
 - O cliente executara no maximo uma busca por pergunta.
+- Se precisar de uma resposta do usuario antes da busca, solicite-a no objeto JSON com o campo "clarification" e deixe "query" vazio. A busca só será feita depois que a resposta for entendida e a consulta reformulada.
 - Se nao precisar pesquisar, responda normalmente.
 - Quando receber resultados da ferramenta, baseie os fatos atuais neles, cite as fontes usando [1], [2] etc. e indique incerteza quando as fontes forem insuficientes.
 - Use o texto extraído das páginas quando disponível. Se só houver resumo de busca, deixe claro quando isso limitar a resposta.
@@ -413,6 +454,193 @@ def search_web(query: str, options: dict = None) -> dict:
             "published_date": str(published_date)[:100],
         })
     return {"results": results, "unresponsive_engines": data.get("unresponsive_engines", [])}
+
+def _weather_location(question: str) -> str:
+    """Extract only an explicitly named place; never guess the user's location."""
+    matches = re.finditer(
+        r"\b(?:em|no|na|para|cidade de)\s+([A-Za-zÀ-ÿ][A-Za-zÀ-ÿ .'-]{1,70})",
+        question,
+        re.IGNORECASE,
+    )
+    generic_locations = {
+        "hoje", "agora", "amanha", "amanhã", "mim", "voce", "você", "aqui",
+        "minha cidade", "minha regiao", "minha região", "onde estou",
+    }
+    for match in matches:
+        location = match.group(1).strip(" .,!?:;'")
+        location = re.sub(
+            r"\s+\b(?:hoje|agora|amanh[ãa]|neste momento|atualmente|por favor|\w+\?)\b.*$",
+            "",
+            location,
+            flags=re.IGNORECASE,
+        ).strip(" .,!?:;")
+        if location and location.lower() not in generic_locations:
+            return location
+    return ""
+
+def _weather_results_are_relevant(results: list) -> list:
+    """Keep weather-provider results only, so generic viral matches cannot ground an answer."""
+    accepted = []
+    for item in results:
+        try:
+            hostname = (parse.urlsplit(item.get("url", "")).hostname or "").lower().rstrip(".")
+        except ValueError:
+            continue
+        if not any(hostname == domain or hostname.endswith("." + domain) for domain in WEATHER_SOURCE_DOMAINS):
+            continue
+        evidence = " ".join((item.get("title", ""), item.get("content", ""), item.get("page_text", "")))
+        if re.search(r"\b(?:temperatura|previs[aã]o|m[eé]dia|m[ií]nima|m[aá]xima)\b|\d{1,2}\s*°\s*[CF]?", evidence, re.IGNORECASE):
+            accepted.append(item)
+    return accepted
+
+def _search_results_are_relevant(query: str, results: list) -> list:
+    """Discard result sets with no meaningful lexical connection to the query."""
+    stopwords = {
+        "a", "ao", "aos", "as", "com", "como", "da", "das", "de", "do", "dos",
+        "e", "em", "essa", "esse", "esta", "este", "hoje", "mais", "meu", "minha",
+        "na", "nas", "no", "nos", "o", "os", "ou", "para", "pela", "pelo", "por",
+        "qual", "que", "se", "um", "uma", "uns", "umas", "atual", "atualmente",
+        "agora", "recentemente", "recente", "versao", "versões", "versoes",
+    }
+
+    def terms(text: str) -> set[str]:
+        folded = "".join(
+            char for char in unicodedata.normalize("NFD", text.lower())
+            if unicodedata.category(char) != "Mn"
+        )
+        return {term for term in re.findall(r"[a-z0-9]{3,}", folded) if term not in stopwords}
+
+    query_terms = terms(query)
+    if not query_terms:
+        return results
+    minimum_matches = 1 if len(query_terms) == 1 else 2
+    relevant = []
+    for item in results:
+        evidence = " ".join((item.get("title", ""), item.get("content", ""), item.get("page_text", "")))
+        if len(query_terms.intersection(terms(evidence))) >= minimum_matches:
+            relevant.append(item)
+    return relevant
+
+def _ask_search_clarification(question: str) -> str | None:
+    """Ask once and return the user's full reply; callers must classify its intent."""
+    print_markdown(question)
+    if not sys.stdin.isatty():
+        return None
+    try:
+        return input("Sua resposta: ").strip()
+    except EOFError:
+        return None
+
+def _is_plausible_location(value: str) -> bool:
+    words = re.findall(r"[A-Za-zÀ-ÿ]+", value.lower())
+    if not re.fullmatch(r"[A-Za-zÀ-ÿ][A-Za-zÀ-ÿ .,'-]{0,75}", value.strip()):
+        return False
+    if not 1 <= len(words) <= 5:
+        return False
+    conversational = {
+        "nao", "não", "quero", "saber", "estou", "to", "tô", "so", "só",
+        "quebrando", "gelo", "hehe", "haha", "clima", "frio", "hoje", "agora",
+        "pesquisar", "pesquisa", "brincando", "brincadeira", "cancelar", "esquece",
+    }
+    return not conversational.intersection(words)
+
+def _classify_search_clarification(reply: str, expects_location: bool = False) -> tuple[str, str]:
+    """Classify a pending tool follow-up as cancel, respond, continue, replan, or unclear."""
+    reply = reply.strip()
+    if not reply:
+        return "unclear", ""
+    cancellation = SEARCH_CANCELLATION.search(reply)
+    if cancellation:
+        remainder = SEARCH_CANCELLATION.sub(" ", reply)
+        remainder = re.sub(r"\b(?:na verdade|na realidade|em vez disso|quis dizer)\b", " ", remainder, flags=re.IGNORECASE)
+        if NEW_SEARCH_INTENT.search(remainder):
+            if re.search(
+                r"\b(?:sem pesquisar|sem busca|n[aã]o pesquise|n[aã]o pesquisa|"
+                r"n[aã]o quero pesquisar\s*,?\s*(?:mas|por[eé]m))\b",
+                reply,
+                re.IGNORECASE,
+            ):
+                return "respond", ""
+            return "replan", ""
+        return "cancel", ""
+    if NEW_SEARCH_INTENT.search(reply):
+        return "replan", ""
+    location = _weather_location(reply) if expects_location else ""
+    if location and _is_plausible_location(location):
+        return "continue", location
+    if expects_location and _is_plausible_location(reply):
+        return "continue", reply
+    if SEARCH_UNCERTAIN_REPLY.fullmatch(reply):
+        return "unclear", ""
+    return "continue", ""
+
+def _resume_after_search_clarification(
+    messages: list,
+    system_prompt: str,
+    clarification: str,
+    reply: str,
+    search_options: dict = None,
+) -> str:
+    updated_messages = list(messages)
+    updated_messages.extend([
+        {"role": "assistant", "content": clarification},
+        {"role": "user", "content": reply},
+    ])
+    return stream_chat(
+        updated_messages,
+        system_prompt,
+        allow_web_search=True,
+        search_options=search_options,
+    )
+
+def _respond_after_search_cancellation(
+    messages: list,
+    system_prompt: str,
+    reply: str,
+) -> str:
+    if CASUAL_CANCELLATION.search(reply):
+        answer = "Ah, entendi, hehe. Levei a frase ao pé da letra."
+        print_markdown(answer)
+        return answer
+
+    updated_messages = list(messages)
+    original_index = next(
+        (index for index in range(len(updated_messages) - 1, -1, -1)
+         if updated_messages[index].get("role") == "user"),
+        None,
+    )
+    original_question = str(updated_messages[original_index].get("content", "")) if original_index is not None else ""
+    combined_context = (
+        "O usuário comentou: " + repr(original_question) + "\n"
+        "Depois de ser perguntado um detalhe para uma pesquisa, respondeu: " + repr(reply) + ".\n"
+        "A pesquisa foi cancelada. Responda ao comentário ou ao novo pedido explícito do usuário."
+    )
+    if original_index is None:
+        updated_messages.append({"role": "user", "content": combined_context})
+    else:
+        updated_messages[original_index] = {"role": "user", "content": combined_context}
+    cancellation_instructions = (
+        (system_prompt + "\n\n") if system_prompt else ""
+    ) + (
+        "O usuário cancelou uma pesquisa pendente. A mensagem mais recente contém o comentário original "
+        "e a resposta ao esclarecimento; a pergunta de esclarecimento anterior foi removida do contexto. "
+        "Responda ao que o usuário realmente quis dizer, de forma natural e breve quando for conversa casual. "
+        "Só atenda a um novo pedido se ele estiver explícito. Não retome a pergunta pesquisável original, "
+        "não invente tarefas, código ou comandos que não foram pedidos e não use ferramentas nem pesquisa."
+    )
+    return stream_chat(updated_messages, cancellation_instructions, allow_web_search=False)
+
+def _prepare_web_query(question: str) -> tuple[str, str]:
+    """Return (query, error); an empty query plus error means clarification is required."""
+    if WEATHER_QUERY.search(question):
+        location = _weather_location(question)
+        if not location:
+            return "", "weather_location_required"
+        period = "agora" if re.search(r"\b(?:agora|neste momento|atualmente)\b", question, re.IGNORECASE) else "hoje"
+        return f"temperatura atual e previsão do tempo {period} em {location}", ""
+    if CURRENT_FACT_QUERY.search(question) and re.search(r"\b(?:d[oó]lar|d[oó]lares|usd)\b", question, re.IGNORECASE):
+        return "cotação atual do dólar em reais hoje", ""
+    return question.strip()[:500], ""
 
 class _ReadableHTML(HTMLParser):
     SKIP_TAGS = {"script", "style", "noscript", "svg", "nav", "header", "footer", "aside", "form"}
@@ -504,11 +732,81 @@ def format_web_context(query: str, results: list, unresponsive_engines: list = N
         )
     return "\n".join(chunks)
 
-def answer_with_web_search(messages: list, system_prompt: str, query: str, options: dict = None) -> str:
+def answer_with_web_search(
+    messages: list,
+    system_prompt: str,
+    query: str,
+    options: dict = None,
+    clarification: str = None,
+) -> str:
+    original_question = next(
+        (str(msg.get("content", "")) for msg in reversed(messages) if msg.get("role") == "user"),
+        query,
+    )
+    tool_clarification = clarification
+    prepared_query, clarification_reason = _prepare_web_query(original_question)
+    weather_needs_location = clarification_reason == "weather_location_required"
+    pending_clarification = tool_clarification
+    if weather_needs_location:
+        pending_clarification = "Para verificar o clima, preciso saber sua cidade ou região."
+
+    if pending_clarification:
+        reply = _ask_search_clarification(
+            pending_clarification + " Responda com o dado solicitado, reformule o pedido ou diga que não quer pesquisar."
+        )
+        if reply is None:
+            return pending_clarification
+        intent, location = _classify_search_clarification(reply, expects_location=weather_needs_location)
+        if intent == "cancel":
+            return _respond_after_search_cancellation(
+                messages,
+                system_prompt,
+                reply,
+            )
+        if intent == "respond":
+            return _respond_after_search_cancellation(
+                messages,
+                system_prompt,
+                reply,
+            )
+        if intent == "unclear":
+            answer = "Não entendi o dado necessário para pesquisar. Não fiz a busca."
+            print_markdown(answer)
+            return answer
+        if not weather_needs_location or intent == "replan":
+            return _resume_after_search_clarification(
+                messages,
+                system_prompt,
+                pending_clarification,
+                reply,
+                options,
+            )
+        original_question = f"{original_question} em {location}"
+        prepared_query, _ = _prepare_web_query(original_question)
+    if WEATHER_QUERY.search(original_question):
+        query = prepared_query
+    elif CURRENT_FACT_QUERY.search(original_question):
+        query = prepared_query
+    elif not query.strip():
+        query = prepared_query
+
     terminal_console().print(Text("Pesquisando na web...", style="bold cyan"))
     try:
         search_data = search_web(query, options)
         results = search_data["results"]
+        if WEATHER_QUERY.search(original_question):
+            results = _weather_results_are_relevant(results)
+        results = _search_results_are_relevant(query, results)
+        if not results:
+            if WEATHER_QUERY.search(original_question):
+                explanation = "uma fonte meteorológica confiável com dados de temperatura para essa localidade"
+                caution = "Não vou inferir a temperatura a partir de resultados genéricos."
+            else:
+                explanation = "resultados suficientemente relacionados à pergunta"
+                caution = "Não vou formular uma resposta factual com base em fontes fora do assunto."
+            answer = f"\n[Pesquisa inconclusiva]: não encontrei {explanation}. {caution}"
+            print_markdown(answer)
+            return answer
         enrich_web_results(results)
         tool_result = format_web_context(query, results, search_data.get("unresponsive_engines"))
     except RuntimeError as err:
@@ -770,7 +1068,7 @@ def stream_chat(messages, system_prompt: str = None, allow_web_search: bool = Tr
             (msg.get("content", "") for msg in reversed(messages) if msg.get("role") == "user"),
             "",
         )
-        if FRESHNESS_QUERY.search(latest_user_message):
+        if WEATHER_QUERY.search(latest_user_message) or CURRENT_FACT_QUERY.search(latest_user_message):
             search_query = latest_user_message.split("\n\nContexto / Entrada adicional:", 1)[0].strip()[:500]
             return answer_with_web_search(messages, system_prompt, search_query, search_options)
 
@@ -914,6 +1212,7 @@ def stream_chat(messages, system_prompt: str = None, allow_web_search: bool = Tr
                 try:
                     request_data = json.loads((search_request or "").strip())
                     search_query = str(request_data.get("query", "")).strip()
+                    search_clarification = str(request_data.get("clarification", "")).strip()
                 except (json.JSONDecodeError, AttributeError, RuntimeError) as err:
                     answer = "\n[Pesquisa na web indisponível]: solicitação inválida do modelo."
                     if render_output:
@@ -928,6 +1227,7 @@ def stream_chat(messages, system_prompt: str = None, allow_web_search: bool = Tr
                         **{key: request_data.get(key) for key in ("categories", "time_range", "engines", "language")},
                         **{key: value for key, value in (search_options or {}).items() if value is not None},
                     },
+                    clarification=search_clarification or None,
                 )
                 complete_reply = [answer]
             else:

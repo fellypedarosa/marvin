@@ -140,7 +140,21 @@ journalctl -n 50 | mvn "identifique possiveis erros nestes logs"
 ```
 
 ### Pesquisa na Web
-O Marvin pode pesquisar durante uma conversa quando precisar de dados atuais, como cotacoes, ou de informacoes que nao consegue confirmar apenas com o modelo local. Para termos como "agora", "hoje", "mais recente" e "versao atual", o cliente força a busca; em outras perguntas, o modelo pode solicitar a ferramenta. Tambem e possivel forcar ou desativar a pesquisa por pergunta. O cliente executa no maximo uma consulta, tenta extrair o conteudo das tres primeiras paginas e mostra os links consultados.
+O Marvin pode pesquisar durante uma conversa quando precisar de dados atuais, como cotacoes, ou de informacoes que nao consegue confirmar apenas com o modelo local. O cliente reconhece alguns tipos de pergunta atual (por exemplo, cotacoes e clima); em outras perguntas, o modelo pode solicitar a ferramenta. A palavra "hoje" ou "agora" sozinha nao força uma busca. Tambem e possivel forcar ou desativar a pesquisa por pergunta. O cliente executa no maximo uma consulta, tenta extrair o conteudo das tres primeiras paginas e mostra os links consultados.
+
+A busca automatica considera o assunto junto com a atualidade; palavras como
+"hoje" sozinhas nao iniciam uma pesquisa. Antes de enviar resultados ao modelo,
+o cliente verifica se os títulos e resumos têm relação lexical mínima com a
+consulta. Para perguntas sobre clima, também reformula a consulta para buscar
+temperatura e previsão. Se a cidade ou região não estiver indicada, pergunta a
+localidade antes de pesquisar. Resultados de sites que não sejam fontes
+meteorológicas reconhecidas são descartados para evitar que páginas virais ou
+memes fundamentem uma resposta sobre temperatura. Se não houver resultados
+relacionados ou uma fonte meteorológica adequada, o Marvin informa que a busca
+foi inconclusiva. Quando uma busca aguarda esclarecimento, o Marvin interpreta a
+resposta antes de agir: pode continuar com os dados fornecidos, reavaliar um
+novo pedido ou cancelar a busca. Os resultados são enviados ao modelo para
+compor uma resposta; eles não são apresentados como substituto da resposta.
 
 O Marvin usa o [SearXNG](https://github.com/searxng/searxng), um metabuscador de codigo aberto, executado localmente via Docker Compose. E necessario ter Docker Engine com o plugin Compose instalado. Nao e necessario criar conta nem configurar chave de API ou pagar por consulta ao SearXNG. Ele encaminha as consultas aos mecanismos externos; esses mecanismos podem limitar ou bloquear requisicoes.
 
