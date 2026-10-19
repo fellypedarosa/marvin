@@ -3,6 +3,7 @@
 set -eu
 
 REPOSITORY_URL="https://github.com/fellypedarosa/marvin"
+SSH_REPOSITORY_URL=$(printf '%s@%s:%s' git github.com fellypedarosa/marvin)
 MODEL_URL="https://huggingface.co/mozilla-ai/llamafile_0.10/resolve/main/Qwen3.5-2B-Q8_0.llamafile"
 MODEL_NAME="Qwen3.5-2B-Q8_0.llamafile"
 
@@ -68,7 +69,7 @@ else
         [ -d "$PROJECT_DIR/.git" ] || say_error "$PROJECT_DIR existe, mas não parece ser um clone Git do Marvin."
         REMOTE_URL=$(git -C "$PROJECT_DIR" remote get-url origin 2>/dev/null || true)
         case "$REMOTE_URL" in
-            https://github.com/fellypedarosa/marvin|https://github.com/fellypedarosa/marvin.git|git@github.com:fellypedarosa/marvin|git@github.com:fellypedarosa/marvin.git) ;;
+            https://github.com/fellypedarosa/marvin|https://github.com/fellypedarosa/marvin.git|"$SSH_REPOSITORY_URL"|"$SSH_REPOSITORY_URL.git") ;;
             *) say_error "o repositório existente em $PROJECT_DIR não corresponde a $REPOSITORY_URL." ;;
         esac
     else
