@@ -57,6 +57,47 @@ O sistema e composto por tres componentes principais:
 
 ---
 
+### Organizacao do codigo
+
+O executavel `mvn` e o ponto de entrada e chama `marvin/cli.py`. A implementacao
+fica no pacote `marvin/`, dividido por responsabilidade:
+
+| Modulo | Responsabilidade |
+| --- | --- |
+| `cli.py` | Argumentos e chat interativo |
+| `api.py` | Comunicacao HTTP com o modelo e erros da API |
+| `chat.py` | Streaming e respostas com pesquisa |
+| `search.py` | Protocolo de pesquisa, SearXNG e extracao de paginas |
+| `planning.py` | Plano de tarefas e dependencias entre etapas |
+| `actions.py` | Ciclo operacional, confirmacoes e execucao |
+| `sessions.py` | Leitura, gravacao e limites do historico |
+| `personality.py` | Leitura e edicao da personalidade |
+| `safety.py` | Filtro de comandos |
+| `terminal.py` | Renderizacao e resumos de saida |
+| `config.py` | Conexoes, caminhos e limites |
+
+O comando de uso e o instalador continuam utilizando `mvn` na raiz do projeto.
+
+### Desenvolvimento em branches
+
+Antes de iniciar uma mudanca, crie uma branch a partir da `main` com a arvore de
+trabalho limpa:
+
+```bash
+git switch main
+git switch -c refactor/nome-da-mudanca
+```
+
+Faca as alteracoes e execute os testes nessa branch. Depois de revisar o diff,
+crie um commit e publique a branch para abrir um pull request:
+
+```bash
+git diff
+git add <arquivos-alterados>
+git commit -m "Descreva a mudanca"
+git push -u origin refactor/nome-da-mudanca
+```
+
 ## Testes Automatizados
 
 Instale a dependencia do cliente:

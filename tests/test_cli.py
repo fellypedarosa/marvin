@@ -1,6 +1,4 @@
 import contextlib
-import importlib.machinery
-import importlib.util
 import io
 import json
 import subprocess
@@ -11,13 +9,7 @@ from pathlib import Path
 from urllib.error import HTTPError
 from unittest import mock
 
-
-ROOT = Path(__file__).resolve().parents[1]
-LOADER = importlib.machinery.SourceFileLoader("marvin_cli_under_test", str(ROOT / "mvn"))
-SPEC = importlib.util.spec_from_loader(LOADER.name, LOADER)
-marvin = importlib.util.module_from_spec(SPEC)
-sys.modules[LOADER.name] = marvin
-LOADER.exec_module(marvin)
+from marvin import actions, api, chat, cli, config, personality, planning, search as web, sessions
 
 
 def stream_response(content):
@@ -30,7 +22,7 @@ class MarvinCLITests(unittest.TestCase):
     def setUp(self):
         self.temp_dir = tempfile.TemporaryDirectory()
         self.sessions_dir = Path(self.temp_dir.name) / "sessions"
-        self.sessions_patcher = mock.patch.object(marvin, "SESSIONS_DIR", self.sessions_dir)
+        self.sessions_patcher = mock.patch.object(config, "SESSIONS_DIR", self.sessions_dir)
         self.sessions_patcher.start()
         self.addCleanup(self.sessions_patcher.stop)
         self.addCleanup(self.temp_dir.cleanup)
@@ -38,13 +30,13 @@ class MarvinCLITests(unittest.TestCase):
     def run_cli(self, arguments, urlopen=None):
         stdout = io.StringIO()
         with contextlib.ExitStack() as stack:
-            stack.enter_context(mock.patch.object(marvin, "get_system_prompt", return_value="Prompt de teste"))
+            stack.enter_context(mock.patch.object(personality, "get_system_prompt", return_value="Prompt de teste"))
             stack.enter_context(mock.patch.object(sys, "argv", ["mvn", *arguments]))
             stack.enter_context(mock.patch.object(sys, "stdin", io.StringIO("")))
             if urlopen is not None:
-                stack.enter_context(mock.patch.object(marvin.request, "urlopen", side_effect=urlopen))
+                stack.enter_context(mock.patch.object(api.request, "urlopen", side_effect=urlopen))
             stack.enter_context(contextlib.redirect_stdout(stdout))
-            marvin.main()
+            cli.main()
         return stdout.getvalue()
 
     def captured_payload(self, urlopen_mock, call_index=0):
@@ -52,14 +44,14 @@ class MarvinCLITests(unittest.TestCase):
         return json.loads(request.data.decode("utf-8"))
 
     def test_web_search_parser_repairs_extra_braces_and_missing_marker_character(self):
-        payload, error = marvin._parse_web_search_request(
+        payload, error = web._parse_web_search_request(
             '<<<WEB_SEARCH>>>{{"query": "filme Homem-Aranha 2 lançamento"}}'
         )
 
         self.assertEqual(error, "")
         self.assertEqual(payload["query"], "filme Homem-Aranha 2 lançamento")
 
-        payload, error = marvin._parse_web_search_request(
+        payload, error = web._parse_web_search_request(
             '<<<WEB_SEARCH>>\n{"query": "presidente atual da Argentina"}'
         )
         self.assertEqual(error, "")
@@ -69,10 +61,10 @@ class MarvinCLITests(unittest.TestCase):
         initial = '<<<WEB_SEARCH>>>\n{"query": "lançamento Homem-Aranha 2",}'
         repaired = '<<<WEB_SEARCH>>>\n{"query": "lançamento Homem-Aranha 2"}'
         messages = [{"role": "user", "content": "qual foi o lançamento de Homem-Aranha 2?"}]
-        with mock.patch.object(marvin.request, "urlopen", return_value=stream_response(initial)):
-            with mock.patch.object(marvin, "query_messages_raw", return_value=repaired) as repair:
-                with mock.patch.object(marvin, "answer_with_web_search", return_value="O filme foi lançado em 2004.") as answer:
-                    result = marvin.stream_chat(messages, "Prompt de teste", render_output=False)
+        with mock.patch.object(api.request, "urlopen", return_value=stream_response(initial)):
+            with mock.patch.object(api, "query_messages_raw", return_value=repaired) as repair:
+                with mock.patch.object(chat, "answer_with_web_search", return_value="O filme foi lançado em 2004.") as answer:
+                    result = chat.stream_chat(messages, "Prompt de teste", render_output=False)
 
         self.assertEqual(result, "O filme foi lançado em 2004.")
         repair.assert_called_once()
@@ -81,8 +73,8 @@ class MarvinCLITests(unittest.TestCase):
 
     def test_explicit_search_request_uses_web_evidence_flow(self):
         messages = [{"role": "user", "content": "pesquise quando foi lançado o filme Homem-Aranha 2"}]
-        with mock.patch.object(marvin, "answer_with_web_search", return_value="Resposta baseada nas fontes.") as answer:
-            result = marvin.stream_chat(messages, "Prompt de teste", render_output=False)
+        with mock.patch.object(chat, "answer_with_web_search", return_value="Resposta baseada nas fontes.") as answer:
+            result = chat.stream_chat(messages, "Prompt de teste", render_output=False)
 
         self.assertEqual(result, "Resposta baseada nas fontes.")
         answer.assert_called_once()
@@ -90,9 +82,9 @@ class MarvinCLITests(unittest.TestCase):
 
     def test_explicit_search_cancellation_does_not_call_web_search(self):
         messages = [{"role": "user", "content": "pesquise o clima, não quero saber do tempo"}]
-        with mock.patch.object(marvin, "answer_with_web_search") as answer:
-            with mock.patch.object(marvin.request, "urlopen", return_value=stream_response("Entendi.")) as model:
-                result = marvin.stream_chat(messages, "Prompt de teste", render_output=False)
+        with mock.patch.object(chat, "answer_with_web_search") as answer:
+            with mock.patch.object(api.request, "urlopen", return_value=stream_response("Entendi.")) as model:
+                result = chat.stream_chat(messages, "Prompt de teste", render_output=False)
 
         answer.assert_not_called()
         model.assert_called_once()
@@ -110,9 +102,9 @@ class MarvinCLITests(unittest.TestCase):
             {"role": "user", "content": "Pesquise o presidente atual da Argentina."},
         ]
 
-        with mock.patch.object(marvin, "query_messages_raw", query):
-            with mock.patch.object(marvin, "_run_action_web_search", return_value="Consulta: presidente atual. [1] fonte") as search:
-                result = marvin.query_action_model(messages)
+        with mock.patch.object(api, "query_messages_raw", query):
+            with mock.patch.object(actions, "_run_action_web_search", return_value="Consulta: presidente atual. [1] fonte") as search:
+                result = actions.query_action_model(messages)
 
         self.assertEqual(result, "<<<FINAL_ANSWER>>>Pesquisa concluída com evidências.")
         self.assertEqual(query.call_count, 3)
@@ -131,13 +123,13 @@ class MarvinCLITests(unittest.TestCase):
 
     def test_http_500_is_reported_as_model_error_not_connection_error(self):
         body = json.dumps({"error": {"message": "System message must be at the beginning."}}).encode("utf-8")
-        http_error = HTTPError(marvin.API_URL, 500, "Internal Server Error", {}, io.BytesIO(body))
+        http_error = HTTPError(config.API_URL, 500, "Internal Server Error", {}, io.BytesIO(body))
         stderr = io.StringIO()
 
-        with mock.patch.object(marvin.request, "urlopen", side_effect=http_error):
+        with mock.patch.object(api.request, "urlopen", side_effect=http_error):
             with contextlib.redirect_stderr(stderr):
                 with self.assertRaises(SystemExit) as raised:
-                    marvin.stream_chat([{"role": "user", "content": "oi"}], "Prompt de teste")
+                    chat.stream_chat([{"role": "user", "content": "oi"}], "Prompt de teste")
 
         self.assertEqual(raised.exception.code, 1)
         self.assertIn("[Erro do modelo]", stderr.getvalue())
@@ -145,7 +137,7 @@ class MarvinCLITests(unittest.TestCase):
         self.assertNotIn("[Erro de conexao]", stderr.getvalue())
 
     def test_default_memory_question_loads_and_saves_history(self):
-        marvin.save_session("default", [
+        sessions.save_session("default", [
             {"role": "user", "content": "Lembre-se do nome Ada."},
             {"role": "assistant", "content": "Vou lembrar."},
         ])
@@ -157,12 +149,12 @@ class MarvinCLITests(unittest.TestCase):
         contents = [message["content"] for message in payload["messages"]]
         self.assertIn("Lembre-se do nome Ada.", contents)
         self.assertEqual(contents[-1], "qual nome mencionei?")
-        saved = marvin.load_session("default")
+        saved = sessions.load_session("default")
         self.assertEqual(len(saved), 4)
         self.assertEqual(saved[-1]["content"], "Ada.")
 
     def test_named_memory_question_loads_and_saves_its_own_history(self):
-        marvin.save_session("memoriapersonalizada", [
+        sessions.save_session("memoriapersonalizada", [
             {"role": "user", "content": "O projeto se chama Atlas."},
             {"role": "assistant", "content": "Entendido."},
         ])
@@ -172,10 +164,10 @@ class MarvinCLITests(unittest.TestCase):
 
         payload = self.captured_payload(urlopen)
         self.assertEqual(payload["messages"][-3]["content"], "O projeto se chama Atlas.")
-        saved = marvin.load_session("memoriapersonalizada")
+        saved = sessions.load_session("memoriapersonalizada")
         self.assertEqual(len(saved), 4)
         self.assertEqual(saved[-1]["content"], "Atlas.")
-        self.assertFalse(marvin.get_session_file("default").exists())
+        self.assertFalse(sessions.get_session_file("default").exists())
 
     def test_action_mode_confirms_and_executes_proposed_command(self):
         model_replies = iter([
@@ -185,16 +177,16 @@ class MarvinCLITests(unittest.TestCase):
         ])
         completed = subprocess.CompletedProcess("printf seguro", 0, stdout="seguro\n", stderr="")
         output = io.StringIO()
-        with mock.patch.object(marvin, "SESSIONS_DIR", self.sessions_dir):
-            with mock.patch.object(marvin, "get_system_prompt", return_value="Prompt de teste"):
+        with mock.patch.object(config, "SESSIONS_DIR", self.sessions_dir):
+            with mock.patch.object(personality, "get_system_prompt", return_value="Prompt de teste"):
                 with mock.patch.object(sys, "argv", ["mvn", "-x", "confirme uma operação segura"]):
                     with mock.patch.object(sys, "stdin", io.StringIO("")):
-                        with mock.patch.object(marvin, "query_messages_raw", side_effect=lambda _messages: next(model_replies)):
-                            with mock.patch.object(marvin, "search_web") as search:
+                        with mock.patch.object(api, "query_messages_raw", side_effect=lambda _messages: next(model_replies)):
+                            with mock.patch.object(web, "search_web") as search:
                                 with mock.patch("builtins.input", return_value="s"):
-                                    with mock.patch.object(marvin.subprocess, "run", return_value=completed) as run_command:
+                                    with mock.patch.object(actions.subprocess, "run", return_value=completed) as run_command:
                                         with contextlib.redirect_stdout(output):
-                                            marvin.main()
+                                            cli.main()
 
         run_command.assert_called_once()
         search.assert_not_called()
@@ -203,17 +195,17 @@ class MarvinCLITests(unittest.TestCase):
         self.assertIn("Comando concluído.", output.getvalue())
 
     def test_simple_named_directory_request_builds_exact_idempotent_mkdir(self):
-        action = marvin._simple_directory_creation_action("crie uma pasta chamada senna em /tmp")
+        action = planning._simple_directory_creation_action("crie uma pasta chamada senna em /tmp")
 
         self.assertIn("<<<ACTION>>>", action)
         self.assertIn("Comando: mkdir -p -- /tmp/senna", action)
         self.assertEqual(
-            marvin._simple_directory_creation_action("crie uma pasta em /tmp"),
+            planning._simple_directory_creation_action("crie uma pasta em /tmp"),
             "",
             "não deve inventar o nome que falta",
         )
         self.assertEqual(
-            marvin._simple_directory_creation_action("pesquise o presidente atual e crie uma pasta com o nome dele em /tmp"),
+            planning._simple_directory_creation_action("pesquise o presidente atual e crie uma pasta com o nome dele em /tmp"),
             "",
             "a etapa dependente de pesquisa não pode ser convertida em um mkdir antecipado",
         )
@@ -228,19 +220,19 @@ class MarvinCLITests(unittest.TestCase):
         output = io.StringIO()
         events = []
 
-        with mock.patch.object(marvin, "get_system_prompt", return_value="Prompt de teste"):
+        with mock.patch.object(personality, "get_system_prompt", return_value="Prompt de teste"):
             with mock.patch.object(sys, "argv", ["mvn", "-x", "crie uma pasta chamada senna em /tmp"]):
                 with mock.patch.object(sys, "stdin", io.StringIO("")):
-                    with mock.patch.object(marvin, "query_messages_raw", query):
-                        with mock.patch.object(marvin, "search_web") as search:
+                    with mock.patch.object(api, "query_messages_raw", query):
+                        with mock.patch.object(web, "search_web") as search:
                             with mock.patch("builtins.input", return_value="s") as confirmation:
                                 with mock.patch.object(
-                                    marvin.subprocess,
+                                    actions.subprocess,
                                     "run",
                                     side_effect=lambda *args, **kwargs: (events.append("command"), completed)[1],
                                 ) as run_command:
                                     with contextlib.redirect_stdout(output):
-                                        marvin.main()
+                                        cli.main()
 
         search.assert_not_called()
         confirmation.assert_called_once()
@@ -253,7 +245,7 @@ class MarvinCLITests(unittest.TestCase):
 
     def test_action_mode_rejects_unsolicited_search_and_repairs_plain_response(self):
         model_replies = iter([
-            marvin.WEB_SEARCH_MARKER + json.dumps({"query": "como criar arquivo em /tmp"}),
+            web.WEB_SEARCH_MARKER + json.dumps({"query": "como criar arquivo em /tmp"}),
             "Sugiro primeiro verificar o diretório com ls.",
             "<<<ACTION>>>\nComando: touch /tmp/marvin-action-test\nFinalidade: criar o arquivo solicitado",
             "<<<FINAL_ANSWER>>>O arquivo foi criado.",
@@ -263,15 +255,15 @@ class MarvinCLITests(unittest.TestCase):
         completed = subprocess.CompletedProcess("touch", 0, stdout="", stderr="")
         output = io.StringIO()
 
-        with mock.patch.object(marvin, "get_system_prompt", return_value="Prompt de teste"):
+        with mock.patch.object(personality, "get_system_prompt", return_value="Prompt de teste"):
             with mock.patch.object(sys, "argv", ["mvn", "-x", "crie um arquivo chamado marvin-action-test em /tmp"]):
                 with mock.patch.object(sys, "stdin", io.StringIO("")):
-                    with mock.patch.object(marvin, "query_messages_raw", query):
-                        with mock.patch.object(marvin, "search_web") as search:
+                    with mock.patch.object(api, "query_messages_raw", query):
+                        with mock.patch.object(web, "search_web") as search:
                             with mock.patch("builtins.input", return_value="s"):
-                                with mock.patch.object(marvin.subprocess, "run", return_value=completed) as run_command:
+                                with mock.patch.object(actions.subprocess, "run", return_value=completed) as run_command:
                                     with contextlib.redirect_stdout(output):
-                                        marvin.main()
+                                        cli.main()
 
         search.assert_not_called()
         self.assertEqual(run_command.call_count, 1)
@@ -280,11 +272,11 @@ class MarvinCLITests(unittest.TestCase):
         self.assertIn("Comando proposto", output.getvalue())
 
     def test_action_mode_researches_before_proposing_dependent_command(self):
-        plan = marvin.TASK_PLAN_MARKER + json.dumps({"steps": [
+        plan = config.TASK_PLAN_MARKER + json.dumps({"steps": [
             {"id": "s1", "kind": "research", "goal": "Pesquisar o nome do presidente atual de Cuba", "depends_on": []},
             {"id": "s2", "kind": "command", "goal": "Criar a pasta em /tmp com o nome confirmado", "depends_on": ["s1"]},
         ]}, ensure_ascii=False)
-        search_request = marvin.WEB_SEARCH_MARKER + json.dumps({
+        search_request = web.WEB_SEARCH_MARKER + json.dumps({
             "query": "nome do atual presidente de Cuba",
             "categories": "general",
         })
@@ -308,16 +300,16 @@ class MarvinCLITests(unittest.TestCase):
         completed = subprocess.CompletedProcess("mkdir", 0, stdout="", stderr="")
         output = io.StringIO()
 
-        with mock.patch.object(marvin, "get_system_prompt", return_value="Prompt de teste"):
+        with mock.patch.object(personality, "get_system_prompt", return_value="Prompt de teste"):
             with mock.patch.object(sys, "argv", ["mvn", "-x", "pesquise quem é o presidente atual de Cuba e crie uma pasta em /tmp com o nome dele"]):
                 with mock.patch.object(sys, "stdin", io.StringIO("")):
-                    with mock.patch.object(marvin, "query_messages_raw", query):
-                        with mock.patch.object(marvin, "search_web", return_value=search_results) as search:
-                            with mock.patch.object(marvin, "enrich_web_results"):
+                    with mock.patch.object(api, "query_messages_raw", query):
+                        with mock.patch.object(web, "search_web", return_value=search_results) as search:
+                            with mock.patch.object(web, "enrich_web_results"):
                                 with mock.patch("builtins.input", return_value="s"):
-                                    with mock.patch.object(marvin.subprocess, "run", return_value=completed) as run_command:
+                                    with mock.patch.object(actions.subprocess, "run", return_value=completed) as run_command:
                                         with contextlib.redirect_stdout(output):
-                                            marvin.main()
+                                            cli.main()
 
         search.assert_called_once_with("nome do atual presidente de Cuba", {
             "categories": "general",
@@ -335,11 +327,11 @@ class MarvinCLITests(unittest.TestCase):
             "pesquise qual é o nome do atual presidente da Argentina, "
             "e crie uma pasta em /tmp com o nome dele"
         )
-        valid_plan = marvin.TASK_PLAN_MARKER + json.dumps({"steps": [
+        valid_plan = config.TASK_PLAN_MARKER + json.dumps({"steps": [
             {"id": "s1", "kind": "research", "goal": "Identificar o nome oficial atual do Presidente da Argentina", "depends_on": []},
             {"id": "s2", "kind": "command", "goal": "Criar em /tmp uma pasta com o nome encontrado", "depends_on": ["s1"]},
         ]}, ensure_ascii=False)
-        search_request = marvin.WEB_SEARCH_MARKER + json.dumps({
+        search_request = web.WEB_SEARCH_MARKER + json.dumps({
             "step_id": "s1",
             "query": "nome atual do presidente da Argentina",
             "categories": "general",
@@ -370,16 +362,16 @@ class MarvinCLITests(unittest.TestCase):
         output = io.StringIO()
         events = []
 
-        with mock.patch.object(marvin, "get_system_prompt", return_value="Prompt de teste"):
+        with mock.patch.object(personality, "get_system_prompt", return_value="Prompt de teste"):
             with mock.patch.object(sys, "argv", ["mvn", "-x", user_request]):
                 with mock.patch.object(sys, "stdin", io.StringIO("")):
-                    with mock.patch.object(marvin, "query_messages_raw", query):
-                        with mock.patch.object(marvin, "search_web", side_effect=lambda *args: (events.append("search"), search_results)[1]) as search:
-                            with mock.patch.object(marvin, "enrich_web_results"):
+                    with mock.patch.object(api, "query_messages_raw", query):
+                        with mock.patch.object(web, "search_web", side_effect=lambda *args: (events.append("search"), search_results)[1]) as search:
+                            with mock.patch.object(web, "enrich_web_results"):
                                 with mock.patch("builtins.input", return_value="s") as confirmation:
-                                    with mock.patch.object(marvin.subprocess, "run", side_effect=lambda *args, **kwargs: (events.append("command"), completed)[1]) as run_command:
+                                    with mock.patch.object(actions.subprocess, "run", side_effect=lambda *args, **kwargs: (events.append("command"), completed)[1]) as run_command:
                                         with contextlib.redirect_stdout(output):
-                                            marvin.main()
+                                            cli.main()
 
         self.assertEqual(query.call_count, 6)
         self.assertEqual(search.call_count, 1)
@@ -393,14 +385,14 @@ class MarvinCLITests(unittest.TestCase):
         self.assertNotIn("Plano pendente", output.getvalue())
 
     def test_action_mode_retries_inconclusive_research_before_dependent_action(self):
-        plan = marvin.TASK_PLAN_MARKER + json.dumps({"steps": [
+        plan = config.TASK_PLAN_MARKER + json.dumps({"steps": [
             {"id": "s1", "kind": "research", "goal": "Encontrar o nome atual solicitado", "depends_on": []},
             {"id": "s2", "kind": "command", "goal": "Criar a pasta usando o nome encontrado", "depends_on": ["s1"]},
         ]}, ensure_ascii=False)
-        first_search = marvin.WEB_SEARCH_MARKER + json.dumps({
+        first_search = web.WEB_SEARCH_MARKER + json.dumps({
             "step_id": "s1", "query": "presidente atual Cuba",
         })
-        second_search = marvin.WEB_SEARCH_MARKER + json.dumps({
+        second_search = web.WEB_SEARCH_MARKER + json.dumps({
             "step_id": "s1", "query": "quem é Miguel Díaz-Canel presidente de Cuba",
         }, ensure_ascii=False)
         replies = [
@@ -428,18 +420,18 @@ class MarvinCLITests(unittest.TestCase):
         completed = subprocess.CompletedProcess("mkdir", 0, stdout="", stderr="")
         output = io.StringIO()
 
-        with mock.patch.object(marvin, "get_system_prompt", return_value="Prompt de teste"):
+        with mock.patch.object(personality, "get_system_prompt", return_value="Prompt de teste"):
             with mock.patch.object(sys, "argv", [
                 "mvn", "-x", "pesquise o presidente atual de Cuba e crie uma pasta em /tmp com o nome dele",
             ]):
                 with mock.patch.object(sys, "stdin", io.StringIO("")):
-                    with mock.patch.object(marvin, "query_messages_raw", query):
-                        with mock.patch.object(marvin, "search_web", side_effect=search_responses) as search:
-                            with mock.patch.object(marvin, "enrich_web_results"):
+                    with mock.patch.object(api, "query_messages_raw", query):
+                        with mock.patch.object(web, "search_web", side_effect=search_responses) as search:
+                            with mock.patch.object(web, "enrich_web_results"):
                                 with mock.patch("builtins.input", return_value="s"):
-                                    with mock.patch.object(marvin.subprocess, "run", return_value=completed) as run_command:
+                                    with mock.patch.object(actions.subprocess, "run", return_value=completed) as run_command:
                                         with contextlib.redirect_stdout(output):
-                                            marvin.main()
+                                            cli.main()
 
         self.assertEqual(search.call_count, 2)
         self.assertEqual(run_command.call_count, 1)
@@ -449,27 +441,25 @@ class MarvinCLITests(unittest.TestCase):
         self.assertLess(output.getvalue().index("Pesquisando na web"), output.getvalue().index("Comando proposto"))
 
     def test_action_mode_accepts_followup_search_for_completed_research_step(self):
-        task_steps, error = marvin._validate_task_plan({"steps": [
+        task_steps, error = planning._validate_task_plan({"steps": [
             {"id": "s1", "kind": "research", "goal": "Pesquisar o fato solicitado", "depends_on": []},
             {"id": "s2", "kind": "command", "goal": "Usar o fato na ação", "depends_on": ["s1"]},
         ]})
         self.assertEqual(error, "")
-        action_plan = marvin._build_action_plan("pesquise quem é o presidente atual e crie uma pasta com o nome dele")
+        action_plan = planning._build_action_plan("pesquise quem é o presidente atual e crie uma pasta com o nome dele")
         messages = [
             {"role": "system", "content": "Plano estruturado"},
             {"role": "user", "content": "Solicitação de teste"},
         ]
         requests = [
-            marvin.WEB_SEARCH_MARKER + json.dumps({"step_id": "s1", "query": "consulta inicial"}),
-            marvin.WEB_SEARCH_MARKER + json.dumps({"step_id": "s1", "query": "consulta complementar"}),
+            web.WEB_SEARCH_MARKER + json.dumps({"step_id": "s1", "query": "consulta inicial"}),
+            web.WEB_SEARCH_MARKER + json.dumps({"step_id": "s1", "query": "consulta complementar"}),
             "<<<ACTION>>>\nEtapa: s2\nComando: mkdir -p '/tmp/Miguel Díaz-Canel'\nFinalidade: usar o dado pesquisado",
         ]
         query = mock.Mock(side_effect=requests)
 
-        with mock.patch.object(marvin, "query_messages_raw", query):
-            with mock.patch.object(
-                marvin,
-                "_run_action_web_search",
+        with mock.patch.object(api, "query_messages_raw", query):
+            with mock.patch.object(actions, "_run_action_web_search",
                 side_effect=[
                     "Consulta: quem é o presidente atual?\n"
                     "[1] Miguel Díaz-Canel é o presidente atual de Cuba.\n"
@@ -479,7 +469,7 @@ class MarvinCLITests(unittest.TestCase):
                     "URL: https://example.org/confirmacao",
                 ],
             ) as search:
-                result = marvin.query_action_model(
+                result = actions.query_action_model(
                     messages,
                     allow_web_search=True,
                     action_plan=action_plan,
@@ -502,7 +492,7 @@ class MarvinCLITests(unittest.TestCase):
             {"role": "user", "content": "evidência mais recente"},
         ]
 
-        compacted = marvin._compact_action_messages(messages)
+        compacted = actions._compact_action_messages(messages)
 
         self.assertEqual(compacted[0]["content"], "instruções")
         self.assertEqual(compacted[1]["content"], "tarefa original")
@@ -510,7 +500,7 @@ class MarvinCLITests(unittest.TestCase):
         self.assertIn("evidência mais recente", compacted[-1]["content"])
         self.assertLessEqual(
             sum(len(item["content"]) for item in compacted),
-            marvin.MAX_ACTION_CONTEXT_CHARACTERS,
+            config.MAX_ACTION_CONTEXT_CHARACTERS,
         )
 
     def test_action_search_context_is_capped_before_adding_to_model_history(self):
@@ -520,33 +510,33 @@ class MarvinCLITests(unittest.TestCase):
             "content": "informação relevante " * 200,
             "published_date": "",
         } for index in range(6)]
-        with mock.patch.object(marvin, "MAX_ACTION_SEARCH_CONTEXT_CHARACTERS", 2500):
-            with mock.patch.object(marvin, "search_web", return_value={"results": results, "unresponsive_engines": []}):
-                with mock.patch.object(marvin, "_search_results_are_relevant", return_value=results):
-                    with mock.patch.object(marvin, "enrich_web_results", side_effect=lambda items: [
+        with mock.patch.object(config, "MAX_ACTION_SEARCH_CONTEXT_CHARACTERS", 2500):
+            with mock.patch.object(web, "search_web", return_value={"results": results, "unresponsive_engines": []}):
+                with mock.patch.object(web, "_search_results_are_relevant", return_value=results):
+                    with mock.patch.object(web, "enrich_web_results", side_effect=lambda items: [
                         item.update(page_text="texto da página " * 300) for item in items
                     ]):
-                        context = marvin._run_action_web_search({"query": "informação relevante"})
+                        context = actions._run_action_web_search({"query": "informação relevante"})
 
         self.assertLessEqual(len(context), 2500)
         self.assertIn("Resultados adicionais omitidos", context)
 
     def test_search_web_replaces_null_language_with_configured_default(self):
         response = io.BytesIO(json.dumps({"results": []}).encode())
-        with mock.patch.object(marvin.request, "urlopen", return_value=response) as urlopen:
-            marvin.search_web("quando foi lançado o filme", {"language": None})
+        with mock.patch.object(api.request, "urlopen", return_value=response) as urlopen:
+            web.search_web("quando foi lançado o filme", {"language": None})
 
         request = urlopen.call_args.args[0]
-        params = marvin.parse.parse_qs(marvin.parse.urlsplit(request.full_url).query)
+        params = web.parse.parse_qs(web.parse.urlsplit(request.full_url).query)
         self.assertEqual(params["language"], ["pt-BR"])
 
     def test_action_mode_blocks_unrelated_command_until_required_research_is_done(self):
         user_request = "pesquise qual é o nome do atual presidente de cuba, e crie uma pasta em /tmp com o nome dele"
-        plan = marvin.TASK_PLAN_MARKER + json.dumps({"steps": [
+        plan = config.TASK_PLAN_MARKER + json.dumps({"steps": [
             {"id": "s1", "kind": "research", "goal": "Pesquisar quem é o presidente atual de Cuba", "depends_on": []},
             {"id": "s2", "kind": "command", "goal": "Criar uma pasta em /tmp com o nome confirmado", "depends_on": ["s1"]},
         ]}, ensure_ascii=False)
-        search_request = marvin.WEB_SEARCH_MARKER + json.dumps({
+        search_request = web.WEB_SEARCH_MARKER + json.dumps({
             "query": "nome do atual presidente de Cuba",
             "categories": "general",
         })
@@ -573,16 +563,16 @@ class MarvinCLITests(unittest.TestCase):
         completed = subprocess.CompletedProcess("mkdir", 0, stdout="", stderr="")
         output = io.StringIO()
 
-        with mock.patch.object(marvin, "get_system_prompt", return_value="Prompt de teste"):
+        with mock.patch.object(personality, "get_system_prompt", return_value="Prompt de teste"):
             with mock.patch.object(sys, "argv", ["mvn", "-x", user_request]):
                 with mock.patch.object(sys, "stdin", io.StringIO("")):
-                    with mock.patch.object(marvin, "query_messages_raw", query):
-                        with mock.patch.object(marvin, "search_web", return_value=search_results) as search:
-                            with mock.patch.object(marvin, "enrich_web_results"):
+                    with mock.patch.object(api, "query_messages_raw", query):
+                        with mock.patch.object(web, "search_web", return_value=search_results) as search:
+                            with mock.patch.object(web, "enrich_web_results"):
                                 with mock.patch("builtins.input", return_value="s"):
-                                    with mock.patch.object(marvin.subprocess, "run", return_value=completed) as run_command:
+                                    with mock.patch.object(actions.subprocess, "run", return_value=completed) as run_command:
                                         with contextlib.redirect_stdout(output):
-                                            marvin.main()
+                                            cli.main()
 
         search.assert_called_once_with("nome do atual presidente de Cuba", {
             "categories": "general",
@@ -606,7 +596,7 @@ class MarvinCLITests(unittest.TestCase):
         ))
 
     def test_action_mode_enforces_dependencies_between_generic_command_steps(self):
-        plan = marvin.TASK_PLAN_MARKER + json.dumps({"steps": [
+        plan = config.TASK_PLAN_MARKER + json.dumps({"steps": [
             {"id": "s1", "kind": "command", "goal": "Inspecionar o estado atual", "depends_on": []},
             {"id": "s2", "kind": "command", "goal": "Executar a ação com base na inspeção", "depends_on": ["s1"]},
         ]}, ensure_ascii=False)
@@ -625,14 +615,14 @@ class MarvinCLITests(unittest.TestCase):
         ]
         output = io.StringIO()
 
-        with mock.patch.object(marvin, "get_system_prompt", return_value="Prompt de teste"):
+        with mock.patch.object(personality, "get_system_prompt", return_value="Prompt de teste"):
             with mock.patch.object(sys, "argv", ["mvn", "-x", "inspecione o estado e depois execute a ação baseada nele"]):
                 with mock.patch.object(sys, "stdin", io.StringIO("")):
-                    with mock.patch.object(marvin, "query_messages_raw", query):
+                    with mock.patch.object(api, "query_messages_raw", query):
                         with mock.patch("builtins.input", return_value="s"):
-                            with mock.patch.object(marvin.subprocess, "run", side_effect=completed) as run_command:
+                            with mock.patch.object(actions.subprocess, "run", side_effect=completed) as run_command:
                                 with contextlib.redirect_stdout(output):
-                                    marvin.main()
+                                    cli.main()
 
         self.assertEqual(run_command.call_count, 2)
         self.assertEqual(run_command.call_args_list[0].args[0], "printf estado")
@@ -644,31 +634,31 @@ class MarvinCLITests(unittest.TestCase):
         self.assertIn("As duas etapas foram concluídas.", output.getvalue())
 
     def test_task_plan_rejects_cycles_and_unknown_dependencies(self):
-        cyclic, error = marvin._validate_task_plan({"steps": [
+        cyclic, error = planning._validate_task_plan({"steps": [
             {"id": "s1", "kind": "command", "goal": "primeira", "depends_on": ["s2"]},
             {"id": "s2", "kind": "command", "goal": "segunda", "depends_on": ["s1"]},
         ]})
         self.assertIsNone(cyclic)
         self.assertIn("circulares", error)
 
-        unknown, error = marvin._validate_task_plan({"steps": [
+        unknown, error = planning._validate_task_plan({"steps": [
             {"id": "s1", "kind": "command", "goal": "primeira", "depends_on": ["inexistente"]},
         ]})
         self.assertIsNone(unknown)
         self.assertIn("Dependência inválida", error)
 
     def test_task_planner_repairs_a_plan_that_omits_the_requested_command(self):
-        research_only = marvin.TASK_PLAN_MARKER + json.dumps({"steps": [
+        research_only = config.TASK_PLAN_MARKER + json.dumps({"steps": [
             {"id": "s1", "kind": "research", "goal": "Encontrar o nome", "depends_on": []},
         ]}, ensure_ascii=False)
-        complete_plan = marvin.TASK_PLAN_MARKER + json.dumps({"steps": [
+        complete_plan = config.TASK_PLAN_MARKER + json.dumps({"steps": [
             {"id": "s1", "kind": "research", "goal": "Encontrar o nome", "depends_on": []},
             {"id": "s2", "kind": "command", "goal": "Criar a pasta com o nome encontrado", "depends_on": ["s1"]},
         ]}, ensure_ascii=False)
         query = mock.Mock(side_effect=[research_only, complete_plan])
 
-        with mock.patch.object(marvin, "query_messages_raw", query):
-            steps, error = marvin._plan_task_with_model(
+        with mock.patch.object(api, "query_messages_raw", query):
+            steps, error = planning._plan_task_with_model(
                 "pesquise o nome atual e crie uma pasta com ele",
                 "Prompt de teste",
                 research_required=True,
@@ -681,7 +671,7 @@ class MarvinCLITests(unittest.TestCase):
         self.assertIn("inclua uma etapa command", repair_prompt)
 
     def test_failed_task_step_stays_open_and_blocks_dependent_step_until_retry(self):
-        plan = marvin.TASK_PLAN_MARKER + json.dumps({"steps": [
+        plan = config.TASK_PLAN_MARKER + json.dumps({"steps": [
             {"id": "s1", "kind": "command", "goal": "Preparar o recurso", "depends_on": []},
             {"id": "s2", "kind": "command", "goal": "Usar o recurso preparado", "depends_on": ["s1"]},
         ]}, ensure_ascii=False)
@@ -702,14 +692,14 @@ class MarvinCLITests(unittest.TestCase):
         ]
         output = io.StringIO()
 
-        with mock.patch.object(marvin, "get_system_prompt", return_value="Prompt de teste"):
+        with mock.patch.object(personality, "get_system_prompt", return_value="Prompt de teste"):
             with mock.patch.object(sys, "argv", ["mvn", "-x", "prepare o recurso e depois use o recurso preparado"]):
                 with mock.patch.object(sys, "stdin", io.StringIO("")):
-                    with mock.patch.object(marvin, "query_messages_raw", query):
+                    with mock.patch.object(api, "query_messages_raw", query):
                         with mock.patch("builtins.input", return_value="s"):
-                            with mock.patch.object(marvin.subprocess, "run", side_effect=completed) as run_command:
+                            with mock.patch.object(actions.subprocess, "run", side_effect=completed) as run_command:
                                 with contextlib.redirect_stdout(output):
-                                    marvin.main()
+                                    cli.main()
 
         self.assertEqual(run_command.call_count, 3)
         self.assertEqual(
@@ -724,11 +714,11 @@ class MarvinCLITests(unittest.TestCase):
         self.assertIn("A sequência foi concluída.", output.getvalue())
 
     def test_user_guidance_replans_only_remaining_task_steps(self):
-        initial_plan = marvin.TASK_PLAN_MARKER + json.dumps({"steps": [
+        initial_plan = config.TASK_PLAN_MARKER + json.dumps({"steps": [
             {"id": "s1", "kind": "command", "goal": "Preparar o diretório", "depends_on": []},
             {"id": "s2", "kind": "command", "goal": "Criar o arquivo no diretório", "depends_on": ["s1"]},
         ]}, ensure_ascii=False)
-        revised_plan = marvin.TASK_PLAN_MARKER + json.dumps({"steps": [
+        revised_plan = config.TASK_PLAN_MARKER + json.dumps({"steps": [
             {"id": "s1", "kind": "command", "goal": "Criar o diretório sem sudo conforme solicitado", "depends_on": []},
         ]}, ensure_ascii=False)
         replies = [
@@ -744,14 +734,14 @@ class MarvinCLITests(unittest.TestCase):
         output = io.StringIO()
         answers = iter(["n", "Não use sudo; faça apenas a criação local.", "s"])
 
-        with mock.patch.object(marvin, "get_system_prompt", return_value="Prompt de teste"):
+        with mock.patch.object(personality, "get_system_prompt", return_value="Prompt de teste"):
             with mock.patch.object(sys, "argv", ["mvn", "-x", "prepare o diretório e depois crie o arquivo nele"]):
                 with mock.patch.object(sys, "stdin", io.StringIO("")):
-                    with mock.patch.object(marvin, "query_messages_raw", query):
+                    with mock.patch.object(api, "query_messages_raw", query):
                         with mock.patch("builtins.input", side_effect=lambda _prompt: next(answers)):
-                            with mock.patch.object(marvin.subprocess, "run", return_value=completed) as run_command:
+                            with mock.patch.object(actions.subprocess, "run", return_value=completed) as run_command:
                                 with contextlib.redirect_stdout(output):
-                                    marvin.main()
+                                    cli.main()
 
         run_command.assert_called_once_with(
             "mkdir -p /tmp/novo",
@@ -767,14 +757,14 @@ class MarvinCLITests(unittest.TestCase):
         ))
 
     def test_action_plan_detects_required_research_and_respects_explicit_negative(self):
-        plan = marvin._build_action_plan(
+        plan = planning._build_action_plan(
             "pesquise qual é o nome do atual presidente de cuba e crie uma pasta com o nome dele"
         )
         self.assertTrue(plan["research_required"])
         self.assertIn("Pesquisar na web", plan["steps"][0])
 
         self.assertFalse(
-            marvin._build_action_plan("não pesquise o clima, estou só quebrando o gelo")[
+            planning._build_action_plan("não pesquise o clima, estou só quebrando o gelo")[
                 "research_required"
             ]
         )
@@ -788,15 +778,15 @@ class MarvinCLITests(unittest.TestCase):
         query = mock.Mock(side_effect=replies)
         completed = subprocess.CompletedProcess("printf teste", 0, stdout="teste\n", stderr="")
 
-        with mock.patch.object(marvin, "get_system_prompt", return_value="Prompt de teste"):
+        with mock.patch.object(personality, "get_system_prompt", return_value="Prompt de teste"):
             with mock.patch.object(sys, "argv", ["mvn", "-x", "verifique o fluxo local"]):
                 with mock.patch.object(sys, "stdin", io.StringIO("")):
-                    with mock.patch.object(marvin, "query_messages_raw", query):
-                        with mock.patch.object(marvin, "search_web") as search:
+                    with mock.patch.object(api, "query_messages_raw", query):
+                        with mock.patch.object(web, "search_web") as search:
                             with mock.patch("builtins.input", return_value="s"):
-                                with mock.patch.object(marvin.subprocess, "run", return_value=completed):
+                                with mock.patch.object(actions.subprocess, "run", return_value=completed):
                                     with contextlib.redirect_stdout(io.StringIO()):
-                                        marvin.main()
+                                        cli.main()
 
         search.assert_not_called()
         system_content = query.call_args_list[0].args[0][0]["content"]
@@ -804,7 +794,7 @@ class MarvinCLITests(unittest.TestCase):
         self.assertIn("pesquisa web não é necessária", system_content)
 
     def test_action_mode_no_web_search_disables_research_tool(self):
-        search_request = marvin.WEB_SEARCH_MARKER + json.dumps({"query": "informação atual"})
+        search_request = web.WEB_SEARCH_MARKER + json.dumps({"query": "informação atual"})
         replies = [
             search_request,
             "<<<ACTION>>>\nComando: printf sem-web\nFinalidade: continuar sem pesquisa",
@@ -814,15 +804,15 @@ class MarvinCLITests(unittest.TestCase):
         query = mock.Mock(side_effect=replies)
         completed = subprocess.CompletedProcess("printf sem-web", 0, stdout="sem-web\n", stderr="")
 
-        with mock.patch.object(marvin, "get_system_prompt", return_value="Prompt de teste"):
+        with mock.patch.object(personality, "get_system_prompt", return_value="Prompt de teste"):
             with mock.patch.object(sys, "argv", ["mvn", "-x", "--no-web-search", "continue sem pesquisa"]):
                 with mock.patch.object(sys, "stdin", io.StringIO("")):
-                    with mock.patch.object(marvin, "query_messages_raw", query):
-                        with mock.patch.object(marvin, "search_web") as search:
+                    with mock.patch.object(api, "query_messages_raw", query):
+                        with mock.patch.object(web, "search_web") as search:
                             with mock.patch("builtins.input", return_value="s"):
-                                with mock.patch.object(marvin.subprocess, "run", return_value=completed):
+                                with mock.patch.object(actions.subprocess, "run", return_value=completed):
                                     with contextlib.redirect_stdout(io.StringIO()):
-                                        marvin.main()
+                                        cli.main()
 
         search.assert_not_called()
         self.assertEqual(query.call_count, 4)
@@ -846,15 +836,15 @@ class MarvinCLITests(unittest.TestCase):
         def answer_confirmation(prompt):
             return next(answers)
 
-        with mock.patch.object(marvin, "MAX_ACTION_TURNS", 2):
-            with mock.patch.object(marvin, "get_system_prompt", return_value="Prompt de teste"):
+        with mock.patch.object(config, "MAX_ACTION_TURNS", 2):
+            with mock.patch.object(personality, "get_system_prompt", return_value="Prompt de teste"):
                 with mock.patch.object(sys, "argv", ["mvn", "-x", "crie /tmp/mvn"]):
                     with mock.patch.object(sys, "stdin", io.StringIO("")):
-                        with mock.patch.object(marvin, "query_messages_raw", query):
+                        with mock.patch.object(api, "query_messages_raw", query):
                             with mock.patch("builtins.input", side_effect=answer_confirmation):
-                                with mock.patch.object(marvin.subprocess, "run", return_value=completed) as run_command:
+                                with mock.patch.object(actions.subprocess, "run", return_value=completed) as run_command:
                                     with contextlib.redirect_stdout(output):
-                                        marvin.main()
+                                        cli.main()
 
         run_command.assert_called_once()
         self.assertEqual(run_command.call_args.args[0], "mkdir -p /tmp/mvn")
@@ -876,14 +866,14 @@ class MarvinCLITests(unittest.TestCase):
                 raise KeyboardInterrupt
             return "n"
 
-        with mock.patch.object(marvin, "get_system_prompt", return_value="Prompt de teste"):
+        with mock.patch.object(personality, "get_system_prompt", return_value="Prompt de teste"):
             with mock.patch.object(sys, "argv", ["mvn", "-x", "crie /tmp/mvn"]):
                 with mock.patch.object(sys, "stdin", io.StringIO("")):
-                    with mock.patch.object(marvin, "query_messages_raw", query):
+                    with mock.patch.object(api, "query_messages_raw", query):
                         with mock.patch("builtins.input", side_effect=interrupt_at_guidance):
-                            with mock.patch.object(marvin.subprocess, "run") as run_command:
+                            with mock.patch.object(actions.subprocess, "run") as run_command:
                                 with contextlib.redirect_stdout(output):
-                                    marvin.main()
+                                    cli.main()
 
         run_command.assert_not_called()
         query.assert_called_once()
@@ -912,15 +902,15 @@ class MarvinCLITests(unittest.TestCase):
                 return "verifique se a URL esta certa"
             return "s"
 
-        with mock.patch.object(marvin, "MAX_ACTION_TURNS", 1):
-            with mock.patch.object(marvin, "get_system_prompt", return_value="Prompt de teste"):
+        with mock.patch.object(config, "MAX_ACTION_TURNS", 1):
+            with mock.patch.object(personality, "get_system_prompt", return_value="Prompt de teste"):
                 with mock.patch.object(sys, "argv", ["mvn", "-x", "clone de teste"]):
                     with mock.patch.object(sys, "stdin", io.StringIO("")):
-                        with mock.patch.object(marvin, "query_messages_raw", query):
+                        with mock.patch.object(api, "query_messages_raw", query):
                             with mock.patch("builtins.input", side_effect=answer_confirmation):
-                                with mock.patch.object(marvin.subprocess, "run", side_effect=completed) as run_command:
+                                with mock.patch.object(actions.subprocess, "run", side_effect=completed) as run_command:
                                     with contextlib.redirect_stdout(output):
-                                        marvin.main()
+                                        cli.main()
 
         self.assertEqual(run_command.call_count, 2)
         self.assertIn("Marvin precisa de orientação", output.getvalue())
@@ -946,15 +936,15 @@ class MarvinCLITests(unittest.TestCase):
                 return "encerrar"
             return "s"
 
-        with mock.patch.object(marvin, "MAX_ACTION_TURNS", 1):
-            with mock.patch.object(marvin, "get_system_prompt", return_value="Prompt de teste"):
+        with mock.patch.object(config, "MAX_ACTION_TURNS", 1):
+            with mock.patch.object(personality, "get_system_prompt", return_value="Prompt de teste"):
                 with mock.patch.object(sys, "argv", ["mvn", "-x", "investigue uma falha"]):
                     with mock.patch.object(sys, "stdin", io.StringIO("")):
-                        with mock.patch.object(marvin, "query_messages_raw", query):
+                        with mock.patch.object(api, "query_messages_raw", query):
                             with mock.patch("builtins.input", side_effect=answer_confirmation):
-                                with mock.patch.object(marvin.subprocess, "run", return_value=completed) as run_command:
+                                with mock.patch.object(actions.subprocess, "run", return_value=completed) as run_command:
                                     with contextlib.redirect_stdout(output):
-                                        marvin.main()
+                                        cli.main()
 
         run_command.assert_called_once()
         self.assertEqual(query.call_count, 3, "Nao deve consultar o modelo depois que o usuario encerra")
@@ -981,15 +971,15 @@ class MarvinCLITests(unittest.TestCase):
         ]
         output = io.StringIO()
 
-        with mock.patch.object(marvin, "MAX_ACTION_TURNS", 4):
-            with mock.patch.object(marvin, "get_system_prompt", return_value="Prompt de teste"):
+        with mock.patch.object(config, "MAX_ACTION_TURNS", 4):
+            with mock.patch.object(personality, "get_system_prompt", return_value="Prompt de teste"):
                 with mock.patch.object(sys, "argv", ["mvn", "-x", "clone o repositorio"]):
                     with mock.patch.object(sys, "stdin", io.StringIO("")):
-                        with mock.patch.object(marvin, "query_messages_raw", query):
+                        with mock.patch.object(api, "query_messages_raw", query):
                             with mock.patch("builtins.input", side_effect=["s", "s", "s", "s", "encerrar"]):
-                                with mock.patch.object(marvin.subprocess, "run", side_effect=completed) as run_command:
+                                with mock.patch.object(actions.subprocess, "run", side_effect=completed) as run_command:
                                     with contextlib.redirect_stdout(output):
-                                        marvin.main()
+                                        cli.main()
 
         self.assertEqual(run_command.call_count, 4)
         self.assertIn("Ciclo 1 · Passo 3/4", output.getvalue())
@@ -1008,7 +998,7 @@ class MarvinCLITests(unittest.TestCase):
         }).encode("utf-8"))
         urlopen = mock.Mock(side_effect=[search_response, stream_response("Resposta com fonte.")])
 
-        with mock.patch.object(marvin, "enrich_web_results"):
+        with mock.patch.object(web, "enrich_web_results"):
             output = self.run_cli(["pesquise a cotação do dólar hoje"], urlopen=urlopen)
 
         self.assertEqual(urlopen.call_count, 2)
@@ -1021,9 +1011,9 @@ class MarvinCLITests(unittest.TestCase):
 
     def test_weather_question_without_location_asks_before_searching(self):
         output = io.StringIO()
-        with mock.patch.object(marvin.request, "urlopen") as urlopen:
+        with mock.patch.object(api.request, "urlopen") as urlopen:
             with contextlib.redirect_stdout(output):
-                answer = marvin.stream_chat(
+                answer = chat.stream_chat(
                     [{"role": "user", "content": "Tá frio hoje né?"}],
                     "Prompt de teste",
                 )
@@ -1048,11 +1038,11 @@ class MarvinCLITests(unittest.TestCase):
         model_urlopen = mock.Mock(return_value=stream_response("A máxima será 20°C."))
         output = io.StringIO()
         with mock.patch.object(sys, "stdin", InteractiveInput("Curitiba\n")):
-            with mock.patch.object(marvin, "search_web", return_value=search_data) as search:
-                with mock.patch.object(marvin, "enrich_web_results"):
-                    with mock.patch.object(marvin.request, "urlopen", side_effect=model_urlopen):
+            with mock.patch.object(web, "search_web", return_value=search_data) as search:
+                with mock.patch.object(web, "enrich_web_results"):
+                    with mock.patch.object(api.request, "urlopen", side_effect=model_urlopen):
                         with contextlib.redirect_stdout(output):
-                            marvin.stream_chat(
+                            chat.stream_chat(
                                 [{"role": "user", "content": "Tá frio hoje né?"}],
                                 "Prompt de teste",
                             )
@@ -1078,10 +1068,10 @@ class MarvinCLITests(unittest.TestCase):
         user_input = "Não quero saber do tempo kk só tô quebrando o gelo\n"
         model_urlopen = mock.Mock()
         with mock.patch.object(sys, "stdin", InteractiveInput(user_input)):
-            with mock.patch.object(marvin, "search_web", return_value=misleading_weather_results) as search:
-                with mock.patch.object(marvin.request, "urlopen", side_effect=model_urlopen):
+            with mock.patch.object(web, "search_web", return_value=misleading_weather_results) as search:
+                with mock.patch.object(api.request, "urlopen", side_effect=model_urlopen):
                     with contextlib.redirect_stdout(output):
-                        answer = marvin.stream_chat(
+                        answer = chat.stream_chat(
                             [{"role": "user", "content": "ta frio hoje né"}],
                             "Prompt de teste",
                         )
@@ -1098,7 +1088,7 @@ class MarvinCLITests(unittest.TestCase):
                 return True
 
         proposed_search = (
-            marvin.WEB_SEARCH_MARKER
+            web.WEB_SEARCH_MARKER
             + json.dumps({
                 "query": "",
                 "clarification": "Qual assunto você quer pesquisar?",
@@ -1110,10 +1100,10 @@ class MarvinCLITests(unittest.TestCase):
         ])
         output = io.StringIO()
         with mock.patch.object(sys, "stdin", InteractiveInput("Não precisa pesquisar, deixa pra lá.\n")):
-            with mock.patch.object(marvin, "search_web") as search:
-                with mock.patch.object(marvin.request, "urlopen", side_effect=model_urlopen):
+            with mock.patch.object(web, "search_web") as search:
+                with mock.patch.object(api.request, "urlopen", side_effect=model_urlopen):
                     with contextlib.redirect_stdout(output):
-                        answer = marvin.stream_chat(
+                        answer = chat.stream_chat(
                             [{"role": "user", "content": "Pesquise algo para mim."}],
                             "Prompt de teste",
                         )
@@ -1133,7 +1123,7 @@ class MarvinCLITests(unittest.TestCase):
                 return True
 
         proposed_search = (
-            marvin.WEB_SEARCH_MARKER
+            web.WEB_SEARCH_MARKER
             + json.dumps({
                 "query": "",
                 "clarification": "Qual assunto você quer pesquisar?",
@@ -1144,10 +1134,10 @@ class MarvinCLITests(unittest.TestCase):
             stream_response("A fotossíntese é o processo pelo qual plantas convertem luz em energia química."),
         ])
         with mock.patch.object(sys, "stdin", InteractiveInput("Não pesquise, mas me explique fotossíntese.\n")):
-            with mock.patch.object(marvin, "search_web") as search:
-                with mock.patch.object(marvin.request, "urlopen", side_effect=model_urlopen):
+            with mock.patch.object(web, "search_web") as search:
+                with mock.patch.object(api.request, "urlopen", side_effect=model_urlopen):
                     with contextlib.redirect_stdout(io.StringIO()):
-                        answer = marvin.stream_chat(
+                        answer = chat.stream_chat(
                             [{"role": "user", "content": "Pesquise sobre plantas."}],
                             "Prompt de teste",
                         )
@@ -1162,40 +1152,40 @@ class MarvinCLITests(unittest.TestCase):
 
     def test_search_clarification_routes_cancel_continue_replan_and_unclear(self):
         self.assertEqual(
-            marvin._classify_search_clarification(
+            web._classify_search_clarification(
                 "não quero saber o clima, estou só quebrando o gelo hehe",
                 expects_location=True,
             )[0],
             "cancel",
         )
         self.assertEqual(
-            marvin._classify_search_clarification("Porto Alegre, RS", expects_location=True)[0],
+            web._classify_search_clarification("Porto Alegre, RS", expects_location=True)[0],
             "continue",
         )
         self.assertEqual(
-            marvin._classify_search_clarification(
+            web._classify_search_clarification(
                 "Na verdade, pesquise a cotação do euro hoje.",
                 expects_location=True,
             )[0],
             "replan",
         )
         self.assertEqual(
-            marvin._classify_search_clarification("Não sei", expects_location=True)[0],
+            web._classify_search_clarification("Não sei", expects_location=True)[0],
             "unclear",
         )
         self.assertEqual(
-            marvin._classify_search_clarification("Na verdade, não quero pesquisar.")[0],
+            web._classify_search_clarification("Na verdade, não quero pesquisar.")[0],
             "cancel",
         )
         self.assertEqual(
-            marvin._classify_search_clarification(
+            web._classify_search_clarification(
                 "Não quero pesquisar o clima; em vez disso, me diga a cotação do dólar.",
                 expects_location=True,
             )[0],
             "replan",
         )
         self.assertEqual(
-            marvin._classify_search_clarification(
+            web._classify_search_clarification(
                 "Não pesquise, mas me explique fotossíntese.",
                 expects_location=True,
             )[0],
@@ -1220,11 +1210,11 @@ class MarvinCLITests(unittest.TestCase):
             "unresponsive_engines": [],
         }
         model_urlopen = mock.Mock(return_value=stream_response("A máxima será 20°C."))
-        with mock.patch.object(marvin, "search_web", return_value=search_data) as search:
-            with mock.patch.object(marvin, "enrich_web_results"):
-                with mock.patch.object(marvin.request, "urlopen", side_effect=model_urlopen):
+        with mock.patch.object(web, "search_web", return_value=search_data) as search:
+            with mock.patch.object(web, "enrich_web_results"):
+                with mock.patch.object(api.request, "urlopen", side_effect=model_urlopen):
                     with contextlib.redirect_stdout(io.StringIO()):
-                        marvin.answer_with_web_search(
+                        chat.answer_with_web_search(
                             [{"role": "user", "content": "Tá frio em Curitiba hoje?"}],
                             "Prompt de teste",
                             "Tá frio em Curitiba hoje?",
@@ -1246,10 +1236,10 @@ class MarvinCLITests(unittest.TestCase):
             "unresponsive_engines": [],
         }
         output = io.StringIO()
-        with mock.patch.object(marvin, "search_web", return_value=search_data):
-            with mock.patch.object(marvin.request, "urlopen") as urlopen:
+        with mock.patch.object(web, "search_web", return_value=search_data):
+            with mock.patch.object(api.request, "urlopen") as urlopen:
                 with contextlib.redirect_stdout(output):
-                    answer = marvin.answer_with_web_search(
+                    answer = chat.answer_with_web_search(
                         [{"role": "user", "content": "Tá frio em Curitiba hoje?"}],
                         "Prompt de teste",
                         "Tá frio em Curitiba hoje?",
@@ -1270,10 +1260,10 @@ class MarvinCLITests(unittest.TestCase):
             "unresponsive_engines": [],
         }
         output = io.StringIO()
-        with mock.patch.object(marvin, "search_web", return_value=search_data):
-            with mock.patch.object(marvin.request, "urlopen") as urlopen:
+        with mock.patch.object(web, "search_web", return_value=search_data):
+            with mock.patch.object(api.request, "urlopen") as urlopen:
                 with contextlib.redirect_stdout(output):
-                    answer = marvin.answer_with_web_search(
+                    answer = chat.answer_with_web_search(
                         [{"role": "user", "content": "qual a documentação atual do systemd"}],
                         "Prompt de teste",
                         "documentação atual do systemd",
@@ -1293,22 +1283,22 @@ class MarvinCLITests(unittest.TestCase):
         self.assertEqual(payload["messages"][-1]["content"], "lembre-me de revisar isso hoje")
 
     def test_clear_default_memory_removes_only_default_session(self):
-        marvin.save_session("default", [{"role": "user", "content": "padrão"}])
-        marvin.save_session("outra", [{"role": "user", "content": "preservada"}])
+        sessions.save_session("default", [{"role": "user", "content": "padrão"}])
+        sessions.save_session("outra", [{"role": "user", "content": "preservada"}])
 
         self.run_cli(["-c"])
 
-        self.assertFalse(marvin.get_session_file("default").exists())
-        self.assertTrue(marvin.get_session_file("outra").exists())
+        self.assertFalse(sessions.get_session_file("default").exists())
+        self.assertTrue(sessions.get_session_file("outra").exists())
 
     def test_clear_named_session_removes_only_selected_session(self):
-        marvin.save_session("memoriapersonalizada", [{"role": "user", "content": "apagar"}])
-        marvin.save_session("default", [{"role": "user", "content": "preservar"}])
+        sessions.save_session("memoriapersonalizada", [{"role": "user", "content": "apagar"}])
+        sessions.save_session("default", [{"role": "user", "content": "preservar"}])
 
         self.run_cli(["-c", "memoriapersonalizada"])
 
-        self.assertFalse(marvin.get_session_file("memoriapersonalizada").exists())
-        self.assertTrue(marvin.get_session_file("default").exists())
+        self.assertFalse(sessions.get_session_file("memoriapersonalizada").exists())
+        self.assertTrue(sessions.get_session_file("default").exists())
 
 
 if __name__ == "__main__":
